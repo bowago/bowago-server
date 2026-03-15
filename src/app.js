@@ -8,7 +8,7 @@ const swaggerSpec = require("./config/swagger");
 
 const { errorHandler, notFound } = require("./middleware/error");
 
-// Route imports
+// ─── Route imports ────────────────────────────────────────────────────────────
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const shipmentRoutes = require("./routes/shipment.routes");
@@ -16,30 +16,50 @@ const pricingRoutes = require("./routes/pricing.routes");
 const adminRoutes = require("./routes/admin.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const uploadRoutes = require("./routes/upload.routes");
+const paymentRoutes = require("./routes/payment.routes");
+const surchargeRoutes = require("./routes/surcharge.routes");
+const addressChangeRoutes = require("./routes/addressChange.routes");
+const priceAdjRoutes = require("./routes/priceAdjustment.routes");
+const claimsRoutes = require("./routes/claims.routes");
+const supportRoutes = require("./routes/support.routes");
+const faqRoutes = require("./routes/faq.routes");
+const delayAlertRoutes = require("./routes/delayAlert.routes");
+const invoiceRoutes = require("./routes/invoice.routes");
 
 const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "*",
-    credentials: true,
-  }),
-);
+app.use(cors({ origin: process.env.CLIENT_URL || "*", credentials: true }));
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+
+// ─── Raw body for Paystack webhook (must be before express.json) ──────────────
+app.use(
+  "/api/v1/payments/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res, next) => {
+    if (Buffer.isBuffer(req.body)) {
+      req.rawBody = req.body;
+      req.body = JSON.parse(req.body.toString());
+    }
+    next();
+  },
+);
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+// ─── Swagger UI ───────────────────────────────────────────────────────────────
 app.use(
   "/api-docs",
   swaggerUi.serve,
   swaggerUi.setup(swaggerSpec, {
     customSiteTitle: "BowaGO API Docs",
+    customCss: ".swagger-ui .topbar { background-color: #E85D04; }",
   }),
 );
 
-// ─── Global Rate Limit ────────────────────────────────────────────────────────
+// ─── Rate Limiting ────────────────────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
@@ -53,11 +73,37 @@ const limiter = rateLimit({
 app.use("/api", limiter);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
+app.get("/health", async (req, res) => {
+  const { prisma } = require("./config/db");
+  let dbStatus = "ok";
+  let dbLatencyMs = null;
+
+  try {
+    const start = Date.now();
+    await prisma.$queryRaw`SELECT 1`;
+    dbLatencyMs = Date.now() - start;
+  } catch (err) {
+    dbStatus = "error";
+  }
+
+  const status = dbStatus === "ok" ? "healthy" : "degraded";
+
+  res.status(dbStatus === "ok" ? 200 : 503).json({
+    status,
     service: "BowaGO API",
+    version: "1.0.0",
+    environment: process.env.NODE_ENV || "development",
     timestamp: new Date().toISOString(),
+    uptime: `${Math.floor(process.uptime())}s`,
+    database: { status: dbStatus, latencyMs: dbLatencyMs },
+    checks: {
+      paystack: !!process.env.PAYSTACK_SECRET_KEY ? "configured" : "missing",
+      cloudinary: !!process.env.CLOUDINARY_CLOUD_NAME
+        ? "configured"
+        : "missing",
+      email: !!process.env.SMTP_USER ? "configured" : "missing",
+      jwt: !!process.env.JWT_SECRET ? "configured" : "missing",
+    },
   });
 });
 
@@ -69,6 +115,18 @@ app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/notifications", notificationRoutes);
 app.use("/api/v1/uploads", uploadRoutes);
+app.use("/api/v1/payments", paymentRoutes);
+app.use("/api/v1/surcharges", surchargeRoutes);
+app.use("/api/v1/address-changes", addressChangeRoutes);
+app.use("/api/v1/price-adjustments", priceAdjRoutes);
+app.use("/api/v1/claims", claimsRoutes);
+app.use("/api/v1/support", supportRoutes);
+app.use("/api/v1/faq", faqRoutes);
+app.use("/api/v1/delay-alerts", delayAlertRoutes);
+app.use("/api/v1/invoices", invoiceRoutes);
+
+// ─── Root → docs ──────────────────────────────────────────────────────────────
+app.get("/", (req, res) => res.redirect("/api-docs"));
 
 // ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);

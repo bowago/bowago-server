@@ -6,33 +6,39 @@ const { prisma } = require("./config/db");
 
 const PORT = process.env.PORT || 5000;
 
-async function start() {
-  try {
-    await prisma.$connect();
-    console.log("✅ Database connected");
-
-    app.listen(PORT, () => {
-      console.log(
-        `🚀 BowaGO API running on port ${PORT} [${process.env.NODE_ENV}]`,
-      );
-    });
-  } catch (err) {
-    console.error("❌ Failed to start server:", err);
-    process.exit(1);
-  }
-}
-
-// Only start the server when not on Vercel (serverless)
+// ─── Only start HTTP server when running locally ──────────────────────────────
+// On Vercel (serverless), we just export the app — Vercel handles the server.
+// Calling app.listen() inside a serverless function causes FUNCTION_INVOCATION_FAILED.
 if (process.env.VERCEL !== "1") {
+  async function start() {
+    try {
+      await prisma.$connect();
+      console.log("✅ Database connected");
+      app.listen(PORT, () => {
+        console.log(
+          `🚀 BowaGO API running on port ${PORT} [${process.env.NODE_ENV || "development"}]`,
+        );
+        console.log(`📖 Swagger docs: http://localhost:${PORT}/api-docs`);
+        console.log(`❤️  Health check: http://localhost:${PORT}/health`);
+      });
+    } catch (err) {
+      console.error("❌ Failed to start server:", err);
+      process.exit(1);
+    }
+  }
+
   start();
+
+  process.on("SIGTERM", async () => {
+    await prisma.$disconnect();
+    process.exit(0);
+  });
 } else {
-  // Vercel just needs the export
-  prisma.$connect().catch(console.error);
+  // Vercel: connect DB lazily (connection pooling handled by Neon)
+  prisma.$connect().catch((err) => {
+    console.error("DB connect error:", err);
+  });
 }
 
-process.on("SIGTERM", async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
-
+// Must export app for Vercel to use as a serverless handler
 module.exports = app;
