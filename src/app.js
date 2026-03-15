@@ -138,6 +138,9 @@ app.get("/", (req, res) => {
   });
 });
 
+// NOTE: Do NOT add any app.get("/api-docs", ...) handler here.
+// The swagger-ui-express middleware registered above handles /api-docs entirely.
+
 // ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);

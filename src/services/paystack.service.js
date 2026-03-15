@@ -1,7 +1,7 @@
 const https = require("https");
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto"); // Node built-in — no uuid package needed
 const {
   generateInvoicePDF,
   generateShippingLabelPDF,
@@ -57,7 +57,7 @@ async function initializePayment({
     throw new ApiError(500, "Paystack secret key not configured");
 
   const amountKobo = Math.round(amountNaira * 100);
-  const reference = `BWG-${uuidv4().replace(/-/g, "").slice(0, 16).toUpperCase()}`;
+  const reference = `BWG-${randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase()}`;
 
   const response = await paystackRequest("POST", "/transaction/initialize", {
     email,
@@ -225,7 +225,7 @@ async function refundPayment(reference, amountNaira = null) {
 
   const refundRef = response.data?.id
     ? `REFUND-${response.data.id}`
-    : `REFUND-${uuidv4().slice(0, 8)}`;
+    : `REFUND-${randomUUID().slice(0, 8)}`;
 
   const updated = await prisma.payment.update({
     where: { reference },

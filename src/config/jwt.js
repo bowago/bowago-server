@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('crypto'); // Node built-in — no uuid package needed
 const { prisma } = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -32,7 +32,7 @@ async function generateTokenPair(user, deviceInfo, ipAddress) {
   };
 
   const accessToken = signAccessToken(payload);
-  const refreshToken = signRefreshToken({ sub: user.id, jti: uuidv4() });
+  const refreshToken = signRefreshToken({ sub: user.id, jti: randomUUID() });
 
   // Calculate refresh expiry
   const expiresAt = new Date();
