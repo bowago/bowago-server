@@ -1,0 +1,388 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum AdminSubRole {
+  LOGISTICS_MANAGER
+  SUPER_ADMIN
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  APPLE
+}
+
+enum ShipmentStatus {
+  PENDING
+  CONFIRMED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  CANCELLED
+  RETURNED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum WeightUnit {
+  KG
+  TONS
+  CARTONS
+}
+
+enum NotificationType {
+  SHIPMENT_UPDATE
+  PAYMENT
+  PROMO
+  SYSTEM
+}
+
+// ─── USER ────────────────────────────────────────────────────────────────────
+
+model User {
+  id               String        @id @default(uuid())
+  email            String        @unique
+  phone            String?       @unique
+  firstName        String
+  lastName         String
+  avatar           String?       // Cloudinary URL
+  avatarPublicId   String?
+  role             UserRole      @default(CUSTOMER)
+  adminSubRole     AdminSubRole?
+  authProvider     AuthProvider  @default(EMAIL)
+  googleId         String?       @unique
+  appleId          String?       @unique
+  passwordHash     String?
+  isEmailVerified  Boolean       @default(false)
+  isPhoneVerified  Boolean       @default(false)
+  isActive         Boolean       @default(true)
+  fcmToken         String?       // For push notifications
+
+  // Relations
+  addresses        Address[]
+  shipments        Shipment[]    @relation("CustomerShipments")
+  managedShipments Shipment[]    @relation("AssignedShipments")
+  otpCodes         OtpCode[]
+  refreshTokens    RefreshToken[]
+  notifications    Notification[]
+  activityLogs     ActivityLog[]
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@map("users")
+}
+
+model Address {
+  id          String    @id @default(uuid())
+  userId      String
+  label       String?   // e.g. "Home", "Office"
+  street      String
+  city        String
+  state       String
+  lga         String?
+  postalCode  String?
+  country     String    @default("Nigeria")
+  lat         Float?
+  lng         Float?
+  isDefault   Boolean   @default(false)
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("addresses")
+}
+
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
+
+model OtpCode {
+  id        String    @id @default(uuid())
+  userId    String
+  code      String
+  type      String   
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int       @default(0)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now())
+
+  @@map("otp_codes")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  deviceInfo String?
+  ipAddress  String?
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now())
+
+  @@map("refresh_tokens")
+}
+
+// ─── PRICING PARAMETERS ──────────────────────────────────────────────────────
+
+model City {
+  id        String    @id @default(uuid())
+  name      String    @unique
+  region    String    // North Central, North East, South West, etc.
+  state     String
+
+  fromZones ZoneMatrix[] @relation("FromCity")
+  toZones   ZoneMatrix[] @relation("ToCity")
+  fromKm    KmMatrix[]   @relation("FromCityKm")
+  toKm      KmMatrix[]   @relation("ToCityKm")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("cities")
+}
+
+model BoxDimension {
+  id              String    @id @default(uuid())
+  categoryId      String    @unique // e.g. S-01
+  displayName     String
+  lengthCm        Float
+  widthCm         Float
+  heightCm        Float
+  bestFor         String?
+  weightKgLimit   Float
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("box_dimensions")
+}
+
+model ZoneMatrix {
+  id          String    @id @default(uuid())
+  fromCityId  String
+  toCityId    String
+  zone        Int       // 1 - 4
+
+  fromCity    City      @relation("FromCity", fields: [fromCityId], references: [id])
+  toCity      City      @relation("ToCity", fields: [toCityId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([fromCityId, toCityId])
+  @@map("zone_matrix")
+}
+
+model KmMatrix {
+  id          String    @id @default(uuid())
+  fromCityId  String
+  toCityId    String
+  distanceKm  Float
+
+  fromCity    City      @relation("FromCityKm", fields: [fromCityId], references: [id])
+  toCity      City      @relation("ToCityKm", fields: [toCityId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([fromCityId, toCityId])
+  @@map("km_matrix")
+}
+
+model PriceBand {
+  id              String    @id @default(uuid())
+  zone            Int       // 1-4
+  minKg           Float
+  maxKg           Float?    // null = no upper limit
+  minTons         Float
+  maxTons         Float?
+  minCartons      Int
+  maxCartons      Int?
+  pricePerKg      Float?
+  basePrice       Float?
+  isActive        Boolean   @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("price_bands")
+}
+
+// ─── SHIPMENT ─────────────────────────────────────────────────────────────────
+
+model Shipment {
+  id               String         @id @default(uuid())
+  trackingNumber   String         @unique
+  customerId       String
+  assignedToId     String?
+
+  // Addresses (snapshots at time of booking)
+  senderName       String
+  senderPhone      String
+  senderAddress    String
+  senderCity       String
+  senderState      String
+
+  recipientName    String
+  recipientPhone   String
+  recipientAddress String
+  recipientCity    String
+  recipientState   String
+
+  // Package details
+  description      String?
+  weight           Float          // in kg
+  weightUnit       WeightUnit     @default(KG)
+  cartons          Int?
+  boxDimensionId   String?
+  customLength     Float?
+  customWidth      Float?
+  customHeight     Float?
+
+  // Pricing
+  fromCityId       String?
+  toCityId         String?
+  zone             Int?
+  distanceKm       Float?
+  quotedPrice      Float
+  finalPrice       Float?
+  currency         String         @default("NGN")
+
+  // Status
+  status           ShipmentStatus @default(PENDING)
+  paymentStatus    PaymentStatus  @default(PENDING)
+  paymentRef       String?
+
+  // Scheduling
+  pickupDate       DateTime?
+  estimatedDelivery DateTime?
+  deliveredAt      DateTime?
+
+  // Special handling
+  isFragile        Boolean        @default(false)
+  requiresInsurance Boolean       @default(false)
+  insuranceValue   Float?
+  notes            String?
+
+  // Relations
+  customer         User           @relation("CustomerShipments", fields: [customerId], references: [id])
+  assignedTo       User?          @relation("AssignedShipments", fields: [assignedToId], references: [id])
+  trackingHistory  TrackingEvent[]
+  documents        ShipmentDocument[]
+
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@map("shipments")
+}
+
+model TrackingEvent {
+  id          String    @id @default(uuid())
+  shipmentId  String
+  status      ShipmentStatus
+  location    String?
+  description String
+  lat         Float?
+  lng         Float?
+  updatedBy   String?   // userId of admin who updated
+  proofUrl    String?   // Cloudinary URL for delivery proof
+
+  shipment    Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+
+  @@map("tracking_events")
+}
+
+model ShipmentDocument {
+  id           String   @id @default(uuid())
+  shipmentId   String
+  type         String   // WAYBILL | INVOICE | PROOF_OF_DELIVERY | OTHER
+  url          String   // Cloudinary URL
+  publicId     String
+  uploadedBy   String?
+
+  shipment     Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+
+  @@map("shipment_documents")
+}
+
+// ─── NOTIFICATIONS ───────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime         @default(now())
+
+  @@map("notifications")
+}
+
+// ─── SYSTEM ──────────────────────────────────────────────────────────────────
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  resource  String?
+  resourceId String?
+  metadata  Json?
+  ipAddress String?
+
+  user      User?    @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@map("activity_logs")
+}
+
+model AppSettings {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  type      String   @default("string") // string | number | boolean | json
+  group     String?
+  updatedBy String?
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@map("app_settings")
+}
