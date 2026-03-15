@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
@@ -35,7 +36,7 @@ enum ShipmentStatus {
   FAILED
   CANCELLED
   RETURNED
-  PENDING_ADMIN_REVIEW  // Sprint 5 — address change awaiting approval
+  PENDING_ADMIN_REVIEW
 }
 
 enum PaymentStatus {
@@ -223,7 +224,7 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
-// ─── PRICING PARAMETERS ──────────────────────────────────────────────────────
+// ─── PRICING ─────────────────────────────────────────────────────────────────
 
 model City {
   id        String    @id @default(uuid())
@@ -310,16 +311,15 @@ model PriceBand {
   @@map("price_bands")
 }
 
-// Sprint 2: Surcharge Engine
 model Surcharge {
   id          String        @id @default(uuid())
   type        SurchargeType
-  label       String        // "Fuel Surcharge", "Remote Area Fee", "VAT"
-  description String?       // Tooltip text explaining why it's charged
-  ratePercent Float?        // e.g. 5.5 = 5.5%
-  flatAmount  Float?        // Flat NGN amount
+  label       String
+  description String?
+  ratePercent Float?
+  flatAmount  Float?
   isActive    Boolean       @default(true)
-  appliesTo   String?       // "ALL" | "EXPRESS" | "STANDARD" | "ECONOMY"
+  appliesTo   String?
 
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
@@ -327,12 +327,11 @@ model Surcharge {
   @@map("surcharges")
 }
 
-// Sprint 8: Price version history / audit trail
 model PriceAuditLog {
   id            String    @id @default(uuid())
-  entityType    String    // "PriceBand" | "Surcharge" | "AppSettings"
+  entityType    String
   entityId      String
-  action        String    // "CREATE" | "UPDATE" | "DELETE"
+  action        String
   previousValue Json?
   newValue      Json?
   changedBy     String
@@ -382,19 +381,15 @@ model Shipment {
   quotedPrice      Float
   finalPrice       Float?
   currency         String          @default("NGN")
-
-  // Sprint 2: surcharge breakdown stored as JSON
-  surchargeBreakdown Json?         // [{ label, amount, type }]
+  surchargeBreakdown Json?
 
   status           ShipmentStatus  @default(PENDING)
   paymentStatus    PaymentStatus   @default(PENDING)
+  cutoffWarning    Boolean         @default(false)
 
-  // Sprint 3: Cut-off time logic
-  cutoffWarning    Boolean         @default(false) // true if booked after 2pm same-day
-
-  pickupDate       DateTime?
+  pickupDate        DateTime?
   estimatedDelivery DateTime?
-  deliveredAt      DateTime?
+  deliveredAt       DateTime?
 
   isFragile        Boolean         @default(false)
   requiresInsurance Boolean        @default(false)
@@ -437,7 +432,7 @@ model TrackingEvent {
 model ShipmentDocument {
   id           String   @id @default(uuid())
   shipmentId   String
-  type         String   // WAYBILL | INVOICE | PROOF_OF_DELIVERY | OTHER
+  type         String
   url          String
   publicId     String
   uploadedBy   String?
@@ -449,39 +444,37 @@ model ShipmentDocument {
   @@map("shipment_documents")
 }
 
-// Sprint 5: Address change request workflow
 model AddressChangeRequest {
-  id                String              @id @default(uuid())
-  shipmentId        String
-  userId            String
+  id                  String              @id @default(uuid())
+  shipmentId          String
+  userId              String
   newRecipientAddress String
   newRecipientCity    String
   newRecipientState   String
-  reason            String?
-  status            AddressChangeStatus @default(PENDING)
-  reviewedBy        String?
-  reviewedAt        DateTime?
-  reviewNote        String?
+  reason              String?
+  status              AddressChangeStatus @default(PENDING)
+  reviewedBy          String?
+  reviewedAt          DateTime?
+  reviewNote          String?
 
-  shipment          Shipment            @relation(fields: [shipmentId], references: [id])
-  user              User                @relation(fields: [userId], references: [id])
+  shipment            Shipment            @relation(fields: [shipmentId], references: [id])
+  user                User                @relation(fields: [userId], references: [id])
 
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   @@map("address_change_requests")
 }
 
-// Sprint 5 & 8: Post-booking price adjustment (weight discrepancy at hub)
 model PriceAdjustment {
   id              String    @id @default(uuid())
   shipmentId      String
   originalPrice   Float
   adjustedPrice   Float
   difference      Float
-  reason          String    // "Weight discrepancy: quoted 50kg, actual 65kg"
+  reason          String
   actualWeightKg  Float?
-  proofImageUrl   String?   // Photo of scale at warehouse
+  proofImageUrl   String?
   isAcknowledged  Boolean   @default(false)
   acknowledgedAt  DateTime?
   isPaid          Boolean   @default(false)
@@ -495,12 +488,11 @@ model PriceAdjustment {
   @@map("price_adjustments")
 }
 
-// Sprint 7: Insurance claims
 model Claim {
   id              String      @id @default(uuid())
   shipmentId      String
   userId          String
-  type            String      // "DAMAGE" | "LOSS" | "DELAY"
+  type            String
   description     String
   declaredValue   Float
   claimAmount     Float
@@ -537,7 +529,7 @@ model ClaimImage {
   @@map("claim_images")
 }
 
-// ─── PAYMENTS (Paystack) ──────────────────────────────────────────────────────
+// ─── PAYMENTS ─────────────────────────────────────────────────────────────────
 
 model Payment {
   id                String         @id @default(uuid())
@@ -572,18 +564,18 @@ model Payment {
   @@map("payments")
 }
 
-// ─── SUPPORT (Sprint 6) ───────────────────────────────────────────────────────
+// ─── SUPPORT ──────────────────────────────────────────────────────────────────
 
 model SupportTicket {
   id           String          @id @default(uuid())
-  ticketNumber String          @unique // e.g. TKT-20260311-001
+  ticketNumber String          @unique
   customerId   String
   assignedToId String?
   category     TicketCategory  @default(OTHER)
   subject      String
   status       TicketStatus    @default(OPEN)
-  priority     String          @default("NORMAL") // LOW | NORMAL | HIGH | URGENT
-  shipmentId   String?         // linked shipment if relevant
+  priority     String          @default("NORMAL")
+  shipmentId   String?
   resolvedAt   DateTime?
   closedAt     DateTime?
 
@@ -598,21 +590,20 @@ model SupportTicket {
 }
 
 model TicketMessage {
-  id        String        @id @default(uuid())
-  ticketId  String
-  senderId  String
-  body      String
-  isInternal Boolean      @default(false) // internal agent notes not visible to customer
+  id            String        @id @default(uuid())
+  ticketId      String
+  senderId      String
+  body          String
+  isInternal    Boolean       @default(false)
   attachmentUrl String?
 
-  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticket        SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
-  createdAt DateTime      @default(now())
+  createdAt     DateTime      @default(now())
 
   @@map("ticket_messages")
 }
 
-// Sprint 6: Canned responses / template library
 model CannedResponse {
   id        String    @id @default(uuid())
   title     String
@@ -627,7 +618,7 @@ model CannedResponse {
   @@map("canned_responses")
 }
 
-// ─── KNOWLEDGE BASE / FAQ (Sprint 5) ─────────────────────────────────────────
+// ─── FAQ ──────────────────────────────────────────────────────────────────────
 
 model FaqItem {
   id        String      @id @default(uuid())
@@ -644,7 +635,7 @@ model FaqItem {
   @@map("faq_items")
 }
 
-// ─── NOTIFICATIONS ───────────────────────────────────────────────────────────
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
 model Notification {
   id        String           @id @default(uuid())
@@ -663,7 +654,7 @@ model Notification {
   @@map("notifications")
 }
 
-// ─── SYSTEM ──────────────────────────────────────────────────────────────────
+// ─── SYSTEM ───────────────────────────────────────────────────────────────────
 
 model ActivityLog {
   id         String   @id @default(uuid())
