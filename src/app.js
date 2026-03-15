@@ -125,8 +125,18 @@ app.use("/api/v1/faq", faqRoutes);
 app.use("/api/v1/delay-alerts", delayAlertRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
 
-// ─── Root → docs ──────────────────────────────────────────────────────────────
-app.get("/", (req, res) => res.redirect("/api-docs"));
+// ─── Root — API status ────────────────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "🚀 BowaGO API is live and running",
+    version: "1.0.0",
+    environment: process.env.NODE_ENV || "development",
+    docs: "/api-docs",
+    health: "/health",
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);

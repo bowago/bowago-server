@@ -913,7 +913,7 @@ All monetary values are stored in **Kobo** internally. API responses include com
     }, // end components
     security: [{ bearerAuth: [] }],
   },
-  apis: ["./src/routes/*.js"],
+  apis: [require("path").join(__dirname, "../routes/*.js")],
 };
 
 module.exports = swaggerJsdoc(options);

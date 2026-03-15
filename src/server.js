@@ -1,5 +1,8 @@
 require("express-async-errors");
-require("dotenv").config();
+// Only load .env file locally — on Vercel, env vars are injected by the platform
+if (process.env.VERCEL !== "1") {
+  require("dotenv").config();
+}
 
 const app = require("./app");
 const { prisma } = require("./config/db");
