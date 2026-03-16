@@ -3,7 +3,6 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
-const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 
 const { errorHandler, notFound } = require("./middleware/error");
@@ -49,15 +48,51 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ─── Swagger UI ───────────────────────────────────────────────────────────────
-app.use(
-  "/api-docs",
-  swaggerUi.serve,
-  swaggerUi.setup(swaggerSpec, {
-    customSiteTitle: "BowaGO API Docs",
-    customCss: ".swagger-ui .topbar { background-color: #E85D04; }",
-  }),
-);
+// ─── Swagger UI (CDN-based — works on Vercel serverless) ─────────────────────
+// swagger-ui-express serves its own static files which Vercel returns as
+// text/html with wrong MIME types. Instead we serve a self-contained HTML page
+// that loads all assets from the official CDN, and expose the spec as JSON.
+
+app.get("/api-docs/swagger.json", (req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.json(swaggerSpec);
+});
+
+app.get("/api-docs", (req, res) => {
+  const specUrl = `${req.protocol}://${req.get("host")}/api-docs/swagger.json`;
+  res.setHeader("Content-Type", "text/html");
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>BowaGO API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui.css"/>
+  <style>
+    body { margin: 0; }
+    .swagger-ui .topbar { background-color: #E85D04; }
+    .swagger-ui .topbar .download-url-wrapper { display: none; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function () {
+      SwaggerUIBundle({
+        url: "${specUrl}",
+        dom_id: "#swagger-ui",
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: "StandaloneLayout",
+        deepLinking: true,
+        persistAuthorization: true,
+      });
+    };
+  </script>
+</body>
+</html>`);
+});
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 const limiter = rateLimit({
@@ -138,8 +173,7 @@ app.get("/", (req, res) => {
   });
 });
 
-// NOTE: Do NOT add any app.get("/api-docs", ...) handler here.
-// The swagger-ui-express middleware registered above handles /api-docs entirely.
+// NOTE: Do NOT add any app.get("/api-docs", ...) handler after this block.
 
 // ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);
