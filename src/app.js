@@ -49,19 +49,15 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ─── Swagger UI (CDN-based — works on Vercel serverless) ─────────────────────
-// swagger-ui-express serves its own static files which Vercel returns as
-// text/html with wrong MIME types. Instead we serve a self-contained HTML page
-// that loads all assets from the official CDN, and expose the spec as JSON.
+// swagger-ui-express serves static files that Vercel returns as text/html with
+// wrong MIME types. Instead: expose spec as JSON, render UI via CDN HTML page.
 
 app.get("/api-docs/swagger.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.json(swaggerSpec);
 });
 
-app.get("/api-docs", (req, res) => {
-  const specUrl = `${req.protocol}://${req.get("host")}/api-docs/swagger.json`;
-  res.setHeader("Content-Type", "text/html");
-  res.send(`<!DOCTYPE html>
+const swaggerHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -69,9 +65,18 @@ app.get("/api-docs", (req, res) => {
   <title>BowaGO API Docs</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui.css"/>
   <style>
-    body { margin: 0; }
-    .swagger-ui .topbar { background-color: #E85D04; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: sans-serif; }
+    .swagger-ui .topbar { background-color: #E85D04 !important; }
     .swagger-ui .topbar .download-url-wrapper { display: none; }
+    .swagger-ui .topbar-wrapper img { content: none; }
+    .swagger-ui .topbar-wrapper::after {
+      content: "BowaGO API";
+      color: #fff;
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
   </style>
 </head>
 <body>
@@ -81,17 +86,37 @@ app.get("/api-docs", (req, res) => {
   <script>
     window.onload = function () {
       SwaggerUIBundle({
-        url: "${specUrl}",
+        url: window.location.origin + "/api-docs/swagger.json",
         dom_id: "#swagger-ui",
         presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
         layout: "StandaloneLayout",
         deepLinking: true,
         persistAuthorization: true,
+        displayRequestDuration: true,
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 1,
+        docExpansion: "none",
+        filter: true,
+        tryItOutEnabled: true,
       });
     };
   </script>
 </body>
-</html>`);
+</html>`;
+
+// Handle both /api-docs and /api-docs/ (trailing slash)
+app.get(["/api-docs", "/api-docs/"], (req, res) => {
+  // Override helmet's CSP for this route to allow unpkg CDN assets
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+    "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
+    "img-src 'self' data: https://unpkg.com; " +
+    "connect-src 'self';"
+  );
+  res.setHeader("Content-Type", "text/html");
+  res.send(swaggerHtml);
 });
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
