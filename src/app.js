@@ -3,7 +3,6 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
-const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 const { errorHandler, notFound } = require("./middleware/error");
 
@@ -32,8 +31,6 @@ const app = express();
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
 
-// CLIENT_URL may be a comma-separated list of origins, e.g.:
-//   CLIENT_URL=https://bowagate-frontend.vercel.app,https://www.bowago.com
 const rawOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
@@ -78,15 +75,46 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ─── Swagger UI ───────────────────────────────────────────────────────────────
-app.use(
-  "/api-docs",
-  swaggerUi.serve,
-  swaggerUi.setup(swaggerSpec, {
-    customSiteTitle: "BowaGO API Docs",
-    customCss: ".swagger-ui .topbar { background-color: #E85D04; }",
-  }),
-);
+// ─── Swagger UI (CDN-based — works on Vercel, no static asset MIME issues) ────
+app.get("/api-docs/swagger.json", (req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.send(swaggerSpec);
+});
+
+app.get("/api-docs", (req, res) => {
+  res.setHeader("Content-Type", "text/html");
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BowaGO API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css" />
+  <style>
+    body { margin: 0; }
+    .swagger-ui .topbar { background-color: #E85D04 !important; }
+    .swagger-ui .topbar .download-url-wrapper { display: none; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function () {
+      SwaggerUIBundle({
+        url: "/api-docs/swagger.json",
+        dom_id: "#swagger-ui",
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: "StandaloneLayout",
+        deepLinking: true,
+        persistAuthorization: true,
+      });
+    };
+  </script>
+</body>
+</html>`);
+});
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 app.use(
