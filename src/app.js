@@ -29,7 +29,22 @@ const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_URL || "*", credentials: true }));
+const allowedOrigins = ["http://localhost:3000", process.env.CLIENT_URL].filter(
+  Boolean,
+);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
+    },
+    credentials: true,
+  }),
+);
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 // ─── Raw body for Paystack webhook (must be before express.json) ──────────────
@@ -110,10 +125,10 @@ app.get(["/api-docs", "/api-docs/"], (req, res) => {
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'self'; " +
-    "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
-    "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
-    "img-src 'self' data: https://unpkg.com; " +
-    "connect-src 'self';"
+      "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+      "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
+      "img-src 'self' data: https://unpkg.com; " +
+      "connect-src 'self';",
   );
   res.setHeader("Content-Type", "text/html");
   res.send(swaggerHtml);
