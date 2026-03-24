@@ -29,9 +29,11 @@ const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
-const allowedOrigins = ["http://localhost:3000", process.env.CLIENT_URL].filter(
-  Boolean,
-);
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  process.env.CLIENT_URL,
+].filter(Boolean);
 app.use(
   cors({
     origin: (origin, callback) => {
