@@ -29,27 +29,8 @@ const promoRateRoutes = require("./routes/promoRate.routes");
 const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
-// Helmet is applied globally with a strict CSP, but /api-docs gets its own
-// relaxed CSP so it can load Swagger UI assets from the unpkg CDN.
-const helmetMiddleware = helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://unpkg.com"],
-      scriptSrcElem: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
-      styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
-      styleSrcElem: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https://unpkg.com"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'", "https://unpkg.com"],
-      workerSrc: ["blob:"],
-    },
-  },
-});
-app.use(helmetMiddleware);
+app.use(helmet());
 
-// CLIENT_URL may be a comma-separated list of origins, e.g.:
-//   CLIENT_URL=https://bowagate-frontend.vercel.app,https://www.bowago.com
 const rawOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
@@ -94,45 +75,75 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ─── Swagger UI (CDN-based — works on Vercel, no static asset MIME issues) ────
+// ─── Swagger UI (CDN-based — works on Vercel serverless) ─────────────────────
+// swagger-ui-express serves static files that Vercel returns as text/html with
+// wrong MIME types. Instead: expose spec as JSON, render UI via CDN HTML page.
+
 app.get("/api-docs/swagger.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
-  res.send(swaggerSpec);
+  res.json(swaggerSpec);
 });
 
-app.get("/api-docs", (req, res) => {
-  res.setHeader("Content-Type", "text/html");
-  res.send(`<!DOCTYPE html>
+const swaggerHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>BowaGO API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css" />
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui.css"/>
   <style>
-    body { margin: 0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: sans-serif; }
     .swagger-ui .topbar { background-color: #E85D04 !important; }
     .swagger-ui .topbar .download-url-wrapper { display: none; }
+    .swagger-ui .topbar-wrapper img { content: none; }
+    .swagger-ui .topbar-wrapper::after {
+      content: "BowaGO API";
+      color: #fff;
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
   </style>
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
-  <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-standalone-preset.js"></script>
   <script>
     window.onload = function () {
       SwaggerUIBundle({
-        url: "/api-docs/swagger.json",
+        url: window.location.origin + "/api-docs/swagger.json",
         dom_id: "#swagger-ui",
         presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
         layout: "StandaloneLayout",
         deepLinking: true,
         persistAuthorization: true,
+        displayRequestDuration: true,
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 1,
+        docExpansion: "none",
+        filter: true,
+        tryItOutEnabled: true,
       });
     };
   </script>
 </body>
-</html>`);
+</html>`;
+
+// Handle both /api-docs and /api-docs/ (trailing slash)
+app.get(["/api-docs", "/api-docs/"], (req, res) => {
+  // Override helmet's CSP for this route only to allow unpkg CDN assets
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+      "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
+      "img-src 'self' data: https://unpkg.com; " +
+      "connect-src 'self';",
+  );
+  res.setHeader("Content-Type", "text/html");
+  res.send(swaggerHtml);
 });
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
