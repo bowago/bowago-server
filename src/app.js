@@ -29,8 +29,27 @@ const promoRateRoutes = require("./routes/promoRate.routes");
 const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
-app.use(helmet());
+// Helmet is applied globally with a strict CSP, but /api-docs gets its own
+// relaxed CSP so it can load Swagger UI assets from the unpkg CDN.
+const helmetMiddleware = helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "https://unpkg.com"],
+      scriptSrcElem: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
+      styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
+      styleSrcElem: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https://unpkg.com"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", "https://unpkg.com"],
+      workerSrc: ["blob:"],
+    },
+  },
+});
+app.use(helmetMiddleware);
 
+// CLIENT_URL may be a comma-separated list of origins, e.g.:
+//   CLIENT_URL=https://bowagate-frontend.vercel.app,https://www.bowago.com
 const rawOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
