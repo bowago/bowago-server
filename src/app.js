@@ -3,8 +3,8 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
+const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
-
 const { errorHandler, notFound } = require("./middleware/error");
 
 // ─── Route imports ────────────────────────────────────────────────────────────
@@ -24,6 +24,8 @@ const supportRoutes = require("./routes/support.routes");
 const faqRoutes = require("./routes/faq.routes");
 const delayAlertRoutes = require("./routes/delayAlert.routes");
 const invoiceRoutes = require("./routes/invoice.routes");
+const contractRateRoutes = require("./routes/contractRate.routes");
+const promoRateRoutes = require("./routes/promoRate.routes");
 
 const app = express();
 
@@ -47,9 +49,10 @@ app.use(
     credentials: true,
   }),
 );
+
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
-// ─── Raw body for Paystack webhook (must be before express.json) ──────────────
+// ─── Raw body for Paystack webhook — MUST come before express.json() ─────────
 app.use(
   "/api/v1/payments/webhook",
   express.raw({ type: "application/json" }),
@@ -65,114 +68,53 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ─── Swagger UI (CDN-based — works on Vercel serverless) ─────────────────────
-// swagger-ui-express serves static files that Vercel returns as text/html with
-// wrong MIME types. Instead: expose spec as JSON, render UI via CDN HTML page.
-
-app.get("/api-docs/swagger.json", (req, res) => {
-  res.setHeader("Content-Type", "application/json");
-  res.json(swaggerSpec);
-});
-
-const swaggerHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>BowaGO API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui.css"/>
-  <style>
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: sans-serif; }
-    .swagger-ui .topbar { background-color: #E85D04 !important; }
-    .swagger-ui .topbar .download-url-wrapper { display: none; }
-    .swagger-ui .topbar-wrapper img { content: none; }
-    .swagger-ui .topbar-wrapper::after {
-      content: "BowaGO API";
-      color: #fff;
-      font-size: 1.4rem;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-    }
-  </style>
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-bundle.js"></script>
-  <script src="https://unpkg.com/swagger-ui-dist@5.32.0/swagger-ui-standalone-preset.js"></script>
-  <script>
-    window.onload = function () {
-      SwaggerUIBundle({
-        url: window.location.origin + "/api-docs/swagger.json",
-        dom_id: "#swagger-ui",
-        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
-        layout: "StandaloneLayout",
-        deepLinking: true,
-        persistAuthorization: true,
-        displayRequestDuration: true,
-        defaultModelsExpandDepth: 1,
-        defaultModelExpandDepth: 1,
-        docExpansion: "none",
-        filter: true,
-        tryItOutEnabled: true,
-      });
-    };
-  </script>
-</body>
-</html>`;
-
-// Handle both /api-docs and /api-docs/ (trailing slash)
-app.get(["/api-docs", "/api-docs/"], (req, res) => {
-  // Override helmet's CSP for this route to allow unpkg CDN assets
-  res.setHeader(
-    "Content-Security-Policy",
-    "default-src 'self'; " +
-      "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
-      "style-src 'self' 'unsafe-inline' https://unpkg.com; " +
-      "img-src 'self' data: https://unpkg.com; " +
-      "connect-src 'self';",
-  );
-  res.setHeader("Content-Type", "text/html");
-  res.send(swaggerHtml);
-});
+// ─── Swagger UI ───────────────────────────────────────────────────────────────
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    customSiteTitle: "BowaGO API Docs",
+    customCss: ".swagger-ui .topbar { background-color: #E85D04; }",
+  }),
+);
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
-  message: {
-    success: false,
-    message: "Too many requests, please try again later.",
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use("/api", limiter);
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
+    message: {
+      success: false,
+      message: "Too many requests, please try again later.",
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+  }),
+);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get("/health", async (req, res) => {
   const { prisma } = require("./config/db");
   let dbStatus = "ok";
   let dbLatencyMs = null;
-
   try {
-    const start = Date.now();
+    const t = Date.now();
     await prisma.$queryRaw`SELECT 1`;
-    dbLatencyMs = Date.now() - start;
-  } catch (err) {
+    dbLatencyMs = Date.now() - t;
+  } catch {
     dbStatus = "error";
   }
 
-  const status = dbStatus === "ok" ? "healthy" : "degraded";
-
   res.status(dbStatus === "ok" ? 200 : 503).json({
-    status,
+    status: dbStatus === "ok" ? "healthy" : "degraded",
     service: "BowaGO API",
     version: "1.0.0",
     environment: process.env.NODE_ENV || "development",
     timestamp: new Date().toISOString(),
     uptime: `${Math.floor(process.uptime())}s`,
     database: { status: dbStatus, latencyMs: dbLatencyMs },
+    cors: { allowedOrigins: rawOrigins.length > 0 ? rawOrigins : ["*"] },
     checks: {
       paystack: !!process.env.PAYSTACK_SECRET_KEY ? "configured" : "missing",
       cloudinary: !!process.env.CLOUDINARY_CLOUD_NAME
@@ -180,6 +122,7 @@ app.get("/health", async (req, res) => {
         : "missing",
       email: !!process.env.SMTP_USER ? "configured" : "missing",
       jwt: !!process.env.JWT_SECRET ? "configured" : "missing",
+      clientUrl: rawOrigins.length > 0 ? rawOrigins.join(", ") : "open (*)",
     },
   });
 });
@@ -201,23 +144,11 @@ app.use("/api/v1/support", supportRoutes);
 app.use("/api/v1/faq", faqRoutes);
 app.use("/api/v1/delay-alerts", delayAlertRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
+app.use("/api/v1/contract-rates", contractRateRoutes);
+app.use("/api/v1/promo-rates", promoRateRoutes);
 
-// ─── Root — API status ────────────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "🚀 BowaGO API is live and running",
-    version: "1.0.0",
-    environment: process.env.NODE_ENV || "development",
-    docs: "/api-docs",
-    health: "/health",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.get("/", (req, res) => res.redirect("/api-docs"));
 
-// NOTE: Do NOT add any app.get("/api-docs", ...) handler after this block.
-
-// ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
 
