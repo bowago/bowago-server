@@ -32,6 +32,8 @@ const app = express();
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
 
+// CLIENT_URL may be a comma-separated list of origins, e.g.:
+//   CLIENT_URL=https://bowagate-frontend.vercel.app,https://www.bowago.com
 const rawOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
@@ -155,7 +157,18 @@ app.use("/api/v1/invoices", invoiceRoutes);
 app.use("/api/v1/contract-rates", contractRateRoutes);
 app.use("/api/v1/promo-rates", promoRateRoutes);
 
-app.get("/", (req, res) => res.redirect("/api-docs"));
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    service: "BowaGO API",
+    version: "1.0.0",
+    status: "running",
+    environment: process.env.NODE_ENV || "development",
+    timestamp: new Date().toISOString(),
+    docs: "/api-docs",
+    health: "/health",
+  });
+});
 
 app.use(notFound);
 app.use(errorHandler);
