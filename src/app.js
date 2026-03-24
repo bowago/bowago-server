@@ -31,14 +31,22 @@ const app = express();
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
+
+const rawOrigins = (process.env.CLIENT_URL || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
-  process.env.CLIENT_URL,
-].filter(Boolean);
+  ...rawOrigins,
+];
+
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow server-to-server / curl requests (no origin header)
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
