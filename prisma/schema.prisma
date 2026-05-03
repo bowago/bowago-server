@@ -266,6 +266,7 @@ model ZoneMatrix {
   fromCityId  String
   toCityId    String
   zone        Int
+  isActive    Boolean   @default(true)
 
   fromCity    City      @relation("FromCity", fields: [fromCityId], references: [id])
   toCity      City      @relation("ToCity", fields: [toCityId], references: [id])
@@ -294,18 +295,29 @@ model KmMatrix {
 }
 
 model PriceBand {
-  id              String      @id @default(uuid())
-  zone            Int
-  serviceType     ServiceType @default(STANDARD)
-  minKg           Float
-  maxKg           Float?
-  minTons         Float
-  maxTons         Float?
-  minCartons      Int
-  maxCartons      Int?
-  pricePerKg      Float?
-  basePrice       Float?
-  isActive        Boolean     @default(true)
+  id                     String      @id @default(uuid())
+  label                  String?
+  // Pricing mode A: single zone (legacy / granular)
+  zone                   Int?
+  pricePerKg             Float?
+  basePrice              Float?
+  // Pricing mode B: fixed price map across all zones (e.g. {"1":150,"2":200,"3":300,"4":400})
+  fixedPricePerKgByZone  Json?
+  // Weight / volume range
+  minKg                  Float       @default(0)
+  maxKg                  Float?
+  minTons                Float       @default(0)
+  maxTons                Float?
+  minCartons             Int         @default(0)
+  maxCartons             Int?
+  // Discount (optional — mutually exclusive with fixed price fields)
+  discountPercent        Float?
+  serviceType            ServiceType @default(STANDARD)
+  validFrom              DateTime?
+  validUntil             DateTime?
+  notes                  String?
+  isActive               Boolean     @default(true)
+  createdBy              String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -707,7 +719,33 @@ model ContractRate {
   @@map("contract_rates")
 }
 
-// Sprint 2 — Promo Codes
+// Sprint 1 / Story 8.4 — Admin Promo Rates (zone/service-based promotional pricing bands)
+// Distinct from PromoCode (customer-facing coupon codes).
+// PromoRate = time-limited price discounts applied automatically by the pricing engine.
+model PromoRate {
+  id               String      @id @default(uuid())
+  code             String      @unique
+  label            String?
+  description      String?
+  discountPercent  Float?
+  flatDiscount     Float?
+  serviceType      ServiceType?
+  zone             Int?
+  minWeightKg      Float?
+  maxUsageCount    Int?
+  usageCount       Int         @default(0)
+  isActive         Boolean     @default(true)
+  validFrom        DateTime?
+  validUntil       DateTime?
+  createdBy        String?
+
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@map("promo_rates")
+}
+
+// Sprint 2 — Promo Codes (customer-facing codes e.g. LAUNCH20)
 model PromoCode {
   id              String    @id @default(uuid())
   code            String    @unique

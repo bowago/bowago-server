@@ -7,23 +7,22 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  * tags:
  *   name: Promo Rates
  *   description: >
- *     Sprint 2 — Promotional discount codes. Applied when no contract rate exists.
- *     Guests and customers can validate a code before applying it.
- *     Admin manages creation and lifecycle.
+ *     Sprint 1/2 — Admin-defined promotional rate codes applied at the pricing engine level.
+ *     PromoRate is zone/service-aware (e.g. "20% off Zone 1 EXPRESS"). Distinct from PromoCode
+ *     (customer-facing coupon codes). The pricing engine checks PromoRates automatically.
+ *     Guests and customers can validate a code before booking. Admin manages lifecycle.
  */
 
 /**
  * @swagger
  * /promo-rates/validate:
  *   post:
- *     summary: Validate a promo code (Public — Guest & Customer)
+ *     summary: Validate a promo rate code (Public)
  *     tags: [Promo Rates]
  *     security: []
  *     description: >
- *       Checks if a promo code is valid and returns its discount details WITHOUT applying it
- *       and WITHOUT incrementing the usage count. Use this to show the user a discount preview
- *       on the quote screen before they confirm booking.
- *       To actually apply the discount, pass the promoCode in POST /pricing/quote.
+ *       Checks if a promo rate code is valid and returns its discount details WITHOUT applying it.
+ *       Use this to show the user a discount preview on the quote screen before they confirm booking.
  *     requestBody:
  *       required: true
  *       content:
@@ -34,8 +33,7 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  *             properties:
  *               code:
  *                 type: string
- *                 example: LAUNCH20
- *                 description: Case-insensitive promo code
+ *                 example: PROMO20
  *               zone:
  *                 type: integer
  *                 description: Optional — validate against a specific zone
@@ -48,24 +46,6 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  *     responses:
  *       200:
  *         description: Code is valid
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: object
- *                   properties:
- *                     valid: { type: boolean, example: true }
- *                     promo:
- *                       type: object
- *                       properties:
- *                         code:            { type: string, example: LAUNCH20 }
- *                         label:           { type: string, example: "20% off standard shipments" }
- *                         discountPercent: { type: number, example: 20, nullable: true }
- *                         flatDiscount:    { type: number, nullable: true }
- *                         validUntil:      { type: string, format: date-time, nullable: true }
- *                         usageRemaining:  { type: integer, nullable: true, description: "null = unlimited" }
  *       404:
  *         description: Invalid, expired, or does not apply to this shipment
  *       400:
@@ -80,18 +60,28 @@ router.use(authenticate, requireLogisticsOrAbove);
  * @swagger
  * /promo-rates:
  *   get:
- *     summary: List all promo codes (Admin)
+ *     summary: List all promo rates (Admin)
  *     tags: [Promo Rates]
  *     parameters:
  *       - in: query
  *         name: isActive
  *         schema: { type: boolean }
+ *         description: Filter by active/inactive status
+ *       - in: query
+ *         name: serviceType
+ *         schema: { type: string, enum: [EXPRESS, STANDARD, ECONOMY] }
+ *       - in: query
+ *         name: zone
+ *         schema: { type: integer }
  *       - in: query
  *         name: page
  *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
  *     responses:
  *       200:
- *         description: Promo codes returned
+ *         description: Promo rates returned
  *       403:
  *         description: Admin access required
  */
@@ -101,38 +91,38 @@ router.get('/', ctrl.listPromoRates);
  * @swagger
  * /promo-rates:
  *   post:
- *     summary: Create a promo code (Admin)
+ *     summary: Create a promo rate (Admin)
  *     tags: [Promo Rates]
  *     description: >
- *       Creates a new promotional discount code.
+ *       Creates a new admin-defined promotional rate code.
  *       Provide exactly ONE of discountPercent or flatDiscount.
  *       Leave scope fields (serviceType, zone, minWeightKg) as null to apply to all shipments.
+ *       serviceType is optional — if omitted, the promo applies to all service types (STANDARD, EXPRESS, ECONOMY).
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [code, label]
+ *             required: [code]
  *             properties:
  *               code:
  *                 type: string
- *                 example: LAUNCH20
- *                 description: Unique code, stored uppercase, case-insensitive on validation
+ *                 example: PROMO20
+ *                 description: Unique code, stored uppercase
  *               label:
  *                 type: string
- *                 example: "Launch Promo — 20% off all standard shipments"
+ *                 example: "20% off all Zone 1 shipments"
  *               description:
  *                 type: string
- *                 example: "Valid for first 500 customers through March 2026"
  *               discountPercent:
  *                 type: number
  *                 example: 20
- *                 description: "% off base price. Use ONE of this or flatDiscount."
+ *                 description: "% off base price. Provide this OR flatDiscount — not both."
  *               flatDiscount:
  *                 type: number
- *                 example: 2000
- *                 description: "Fixed ₦2,000 off base price"
+ *                 example: 5000
+ *                 description: "Fixed ₦ off base price. Provide this OR discountPercent — not both."
  *               serviceType:
  *                 type: string
  *                 enum: [EXPRESS, STANDARD, ECONOMY]
@@ -145,7 +135,6 @@ router.get('/', ctrl.listPromoRates);
  *               minWeightKg:
  *                 type: number
  *                 nullable: true
- *                 description: "Minimum shipment weight to qualify"
  *               maxUsageCount:
  *                 type: integer
  *                 nullable: true
@@ -154,7 +143,7 @@ router.get('/', ctrl.listPromoRates);
  *               validUntil: { type: string, format: date-time }
  *     responses:
  *       201:
- *         description: Promo code created
+ *         description: Promo rate created
  *       409:
  *         description: Code already exists
  *       400:
@@ -165,8 +154,27 @@ router.post('/', ctrl.createPromoRate);
 /**
  * @swagger
  * /promo-rates/{id}:
+ *   get:
+ *     summary: Get a single promo rate (Admin)
+ *     tags: [Promo Rates]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Promo rate returned
+ *       404:
+ *         description: Not found
+ */
+router.get('/:id', ctrl.getPromoRate);
+
+/**
+ * @swagger
+ * /promo-rates/{id}:
  *   patch:
- *     summary: Update a promo code (Admin)
+ *     summary: Update a promo rate (Admin)
  *     tags: [Promo Rates]
  *     parameters:
  *       - in: path
@@ -184,6 +192,9 @@ router.post('/', ctrl.createPromoRate);
  *               maxUsageCount:   { type: integer }
  *               discountPercent: { type: number }
  *               flatDiscount:    { type: number }
+ *               serviceType:     { type: string, enum: [EXPRESS, STANDARD, ECONOMY] }
+ *               zone:            { type: integer }
+ *               validFrom:       { type: string, format: date-time }
  *               validUntil:      { type: string, format: date-time }
  *     responses:
  *       200:
@@ -197,7 +208,7 @@ router.patch('/:id', ctrl.updatePromoRate);
  * @swagger
  * /promo-rates/{id}:
  *   delete:
- *     summary: Delete a promo code (Admin)
+ *     summary: Delete a promo rate (Admin)
  *     tags: [Promo Rates]
  *     parameters:
  *       - in: path
@@ -207,6 +218,8 @@ router.patch('/:id', ctrl.updatePromoRate);
  *     responses:
  *       200:
  *         description: Deleted
+ *       404:
+ *         description: Not found
  */
 router.delete('/:id', ctrl.deletePromoRate);
 
