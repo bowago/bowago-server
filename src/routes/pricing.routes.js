@@ -466,4 +466,169 @@ router.post('/zone-matrix', pricingController.upsertZoneMatrix);
  */
 router.post('/import', uploadImport.single('file'), pricingController.importPricingSheet);
 
+
+/**
+ * @swagger
+ * /pricing/zone-matrix/{id}/pause:
+ *   patch:
+ *     summary: Pause a zone matrix route (Admin)
+ *     tags: [Pricing]
+ *     description: >
+ *       Temporarily disables a city-pair route by setting isActive = false.
+ *       Paused routes are excluded from pricing lookups and the quote engine.
+ *       Use reinstate to re-enable without deleting the record.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *         description: Zone matrix entry ID
+ *     responses:
+ *       200:
+ *         description: Route paused successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: "Zone route Lagos → Aba paused"
+ *       400:
+ *         description: Zone matrix entry is already paused
+ *       404:
+ *         description: Zone matrix entry not found
+ */
+router.patch('/zone-matrix/:id/pause', pricingController.pauseZoneMatrix);
+
+/**
+ * @swagger
+ * /pricing/zone-matrix/{id}/reinstate:
+ *   patch:
+ *     summary: Reinstate a paused zone matrix route (Admin)
+ *     tags: [Pricing]
+ *     description: >
+ *       Re-enables a previously paused city-pair route by setting isActive = true.
+ *       The route becomes available again in pricing lookups and the quote engine.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *         description: Zone matrix entry ID
+ *     responses:
+ *       200:
+ *         description: Route reinstated successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: "Zone route Lagos → Aba reinstated"
+ *       400:
+ *         description: Zone matrix entry is already active
+ *       404:
+ *         description: Zone matrix entry not found
+ */
+router.patch('/zone-matrix/:id/reinstate', pricingController.reinstateZoneMatrix);
+
+/**
+ * @swagger
+ * /pricing/zone-matrix/{id}:
+ *   delete:
+ *     summary: Permanently delete a zone matrix entry (Super Admin)
+ *     tags: [Pricing]
+ *     description: >
+ *       Hard-deletes a city-pair zone entry. This cannot be undone.
+ *       Prefer pause/reinstate for temporary management.
+ *       Requires Super Admin role.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *         description: Zone matrix entry ID
+ *     responses:
+ *       200:
+ *         description: Zone matrix entry deleted
+ *       404:
+ *         description: Zone matrix entry not found
+ *       403:
+ *         description: Super Admin access required
+ */
+router.delete('/zone-matrix/:id', requireSuperAdmin, pricingController.deleteZoneMatrix);
+
+/**
+ * @swagger
+ * /pricing/stats:
+ *   get:
+ *     summary: Pricing system summary stats
+ *     tags: [Pricing]
+ *     description: >
+ *       Returns a quick count of all major pricing entities.
+ *       Useful for the admin dashboard overview card.
+ *       No authentication required.
+ *     responses:
+ *       200:
+ *         description: Stats returned
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     totalZone:
+ *                       type: integer
+ *                       description: Active city-pair routes in the zone matrix
+ *                       example: 39
+ *                     totalRegisteredCity:
+ *                       type: integer
+ *                       description: Total cities registered in the system
+ *                       example: 42
+ *                     totalContractRate:
+ *                       type: integer
+ *                       description: Active B2B contract rates
+ *                       example: 5
+ *                     totalStandardRate:
+ *                       type: integer
+ *                       description: Active price bands
+ *                       example: 16
+ *                     totalPromoRate:
+ *                       type: integer
+ *                       description: Active admin promo rates
+ *                       example: 3
+ *                     totalBoxDimension:
+ *                       type: integer
+ *                       description: Box dimension types configured
+ *                       example: 10
+ */
+router.get('/stats', pricingController.getPricingStats);
+
+/**
+ * @swagger
+ * /pricing/rollback/{auditLogId}:
+ *   post:
+ *     summary: Rollback a price band to a previous version (Admin)
+ *     tags: [Pricing]
+ *     description: >
+ *       Reverts a price band to its state captured in a specific audit log entry.
+ *       Useful for undoing accidental or erroneous price changes.
+ *       The rollback itself is recorded as a new audit log entry.
+ *     parameters:
+ *       - in: path
+ *         name: auditLogId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *         description: The audit log entry ID to roll back to
+ *     responses:
+ *       200:
+ *         description: Price band rolled back successfully
+ *       400:
+ *         description: No previous value to roll back to, or entity type is not PriceBand
+ *       404:
+ *         description: Audit log entry not found
+ */
+router.post('/rollback/:auditLogId', pricingController.rollbackPriceBand);
+
 module.exports = router;
