@@ -15,9 +15,9 @@ const cities = [
   { name: "Umuahia", region: "South East", state: "Abia" },
   // South South
   { name: "Asaba", region: "South South", state: "Delta" },
-  { name: "Benin Cit", region: "South South", state: "Edo" },
+  { name: "Benin City", region: "South South", state: "Edo" },
   { name: "Calabar", region: "South South", state: "Cross River" },
-  { name: "Port Harc", region: "South South", state: "Rivers" },
+  { name: "Port Harcourt", region: "South South", state: "Rivers" },
   { name: "Uyo", region: "South South", state: "Akwa Ibom" },
   { name: "Yenegoa", region: "South South", state: "Bayelsa" },
   // North Central
@@ -30,13 +30,13 @@ const cities = [
   { name: "Ilorin", region: "North Central", state: "Kwara" },
   // North East
   { name: "Bauchi", region: "North East", state: "Bauchi" },
-  { name: "Damatur", region: "North East", state: "Yobe" },
+  { name: "Damaturu", region: "North East", state: "Yobe" },
   { name: "Gombe", region: "North East", state: "Gombe" },
   { name: "Jalingo", region: "North East", state: "Taraba" },
-  { name: "Maidugu", region: "North East", state: "Borno" },
+  { name: "Maiduguri", region: "North East", state: "Borno" },
   { name: "Yola", region: "North East", state: "Adamawa" },
   // North West
-  { name: "Birnin Ke", region: "North West", state: "Kebbi" },
+  { name: "Birnin Kebbi", region: "North West", state: "Kebbi" },
   { name: "Dutse", region: "North West", state: "Jigawa" },
   { name: "Gusau", region: "North West", state: "Zamfara" },
   { name: "Kaduna", region: "North West", state: "Kaduna" },
@@ -45,11 +45,11 @@ const cities = [
   { name: "Sokoto", region: "North West", state: "Sokoto" },
   { name: "Zaria", region: "North West", state: "Kaduna" },
   // South West
-  { name: "Abeokut", region: "South West", state: "Ogun" },
+  { name: "Abeokuta", region: "South West", state: "Ogun" },
   { name: "Ado-Ekiti", region: "South West", state: "Ekiti" },
   { name: "Akure", region: "South West", state: "Ondo" },
   { name: "Ibadan", region: "South West", state: "Oyo" },
-  { name: "Lagos Cit", region: "South West", state: "Lagos" },
+  { name: "Lagos", region: "South West", state: "Lagos" },
   { name: "Ife", region: "South West", state: "Osun" },
 ];
 

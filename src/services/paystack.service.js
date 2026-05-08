@@ -1,7 +1,7 @@
 const https = require("https");
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
-const { randomUUID } = require("crypto"); // Node built-in — no uuid package needed
+const { randomUUID } = require("crypto");
 const {
   generateInvoicePDF,
   generateShippingLabelPDF,
@@ -236,6 +236,25 @@ async function refundPayment(reference, amountNaira = null) {
       refundAmountKobo: refundKobo,
     },
   });
+
+  // Cancel the shipment so it doesn't show as active after refund
+  if (payment.shipmentId) {
+    await prisma.shipment.update({
+      where: { id: payment.shipmentId },
+      data: {
+        paymentStatus: "REFUNDED",
+        status: "CANCELLED",
+      },
+    });
+
+    await prisma.trackingEvent.create({
+      data: {
+        shipmentId: payment.shipmentId,
+        status: "CANCELLED",
+        description: `Shipment cancelled following refund of ₦${(refundKobo / 100).toLocaleString()}.`,
+      },
+    });
+  }
 
   if (payment.userId) {
     await prisma.notification.create({
