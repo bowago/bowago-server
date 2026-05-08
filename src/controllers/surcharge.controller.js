@@ -1,41 +1,64 @@
-const { prisma } = require('../config/db');
-const { ApiError } = require('../utils/ApiError');
-const { success, created } = require('../utils/helpers');
+const { prisma } = require("../config/db");
+const { ApiError } = require("../utils/ApiError");
+const { success, created } = require("../utils/helpers");
 
 // ─── List all surcharges (public — used in quote breakdown) ───────────────────
 async function listSurcharges(req, res) {
-  const { active } = req.query;
+  const { active, isActive, type, appliesTo } = req.query;
+
+  // support both ?active=true (legacy) and ?isActive=true (new)
+  const activeFilter =
+    isActive !== undefined
+      ? isActive === "true"
+      : active === "true"
+        ? true
+        : undefined;
+
   const surcharges = await prisma.surcharge.findMany({
-    where: active === 'true' ? { isActive: true } : {},
-    orderBy: { type: 'asc' },
+    where: {
+      ...(activeFilter !== undefined && { isActive: activeFilter }),
+      ...(type && { type: { equals: type, mode: "insensitive" } }),
+      ...(appliesTo && {
+        appliesTo: { equals: appliesTo, mode: "insensitive" },
+      }),
+    },
+    orderBy: { type: "asc" },
   });
   return success(res, { surcharges });
 }
 
 // ─── Create surcharge (Admin) ─────────────────────────────────────────────────
 async function createSurcharge(req, res) {
-  const { type, label, description, ratePercent, flatAmount, appliesTo } = req.body;
+  const { type, label, description, ratePercent, flatAmount, appliesTo } =
+    req.body;
 
   if (!ratePercent && !flatAmount) {
-    throw new ApiError(400, 'Provide either ratePercent or flatAmount');
+    throw new ApiError(400, "Provide either ratePercent or flatAmount");
   }
 
   // Log to price audit trail
   const surcharge = await prisma.surcharge.create({
-    data: { type, label, description, ratePercent, flatAmount, appliesTo: appliesTo || 'ALL' },
+    data: {
+      type,
+      label,
+      description,
+      ratePercent,
+      flatAmount,
+      appliesTo: appliesTo || "ALL",
+    },
   });
 
   await prisma.priceAuditLog.create({
     data: {
-      entityType: 'Surcharge',
+      entityType: "Surcharge",
       entityId: surcharge.id,
-      action: 'CREATE',
+      action: "CREATE",
       newValue: surcharge,
       changedBy: req.user.id,
     },
   });
 
-  return created(res, { surcharge }, 'Surcharge created');
+  return created(res, { surcharge }, "Surcharge created");
 }
 
 // ─── Update surcharge (Admin) ─────────────────────────────────────────────────
@@ -43,7 +66,7 @@ async function updateSurcharge(req, res) {
   const { id } = req.params;
 
   const existing = await prisma.surcharge.findUnique({ where: { id } });
-  if (!existing) throw new ApiError(404, 'Surcharge not found');
+  if (!existing) throw new ApiError(404, "Surcharge not found");
 
   const surcharge = await prisma.surcharge.update({
     where: { id },
@@ -52,9 +75,9 @@ async function updateSurcharge(req, res) {
 
   await prisma.priceAuditLog.create({
     data: {
-      entityType: 'Surcharge',
+      entityType: "Surcharge",
       entityId: id,
-      action: 'UPDATE',
+      action: "UPDATE",
       previousValue: existing,
       newValue: surcharge,
       changedBy: req.user.id,
@@ -62,7 +85,7 @@ async function updateSurcharge(req, res) {
     },
   });
 
-  return success(res, { surcharge }, 'Surcharge updated');
+  return success(res, { surcharge }, "Surcharge updated");
 }
 
 // ─── Delete surcharge ─────────────────────────────────────────────────────────
@@ -70,33 +93,34 @@ async function deleteSurcharge(req, res) {
   const { id } = req.params;
 
   const existing = await prisma.surcharge.findUnique({ where: { id } });
-  if (!existing) throw new ApiError(404, 'Surcharge not found');
+  if (!existing) throw new ApiError(404, "Surcharge not found");
 
   await prisma.surcharge.delete({ where: { id } });
 
   await prisma.priceAuditLog.create({
     data: {
-      entityType: 'Surcharge',
+      entityType: "Surcharge",
       entityId: id,
-      action: 'DELETE',
+      action: "DELETE",
       previousValue: existing,
       changedBy: req.user.id,
     },
   });
 
-  return success(res, {}, 'Surcharge deleted');
+  return success(res, {}, "Surcharge deleted");
 }
 
 // ─── Calculate surcharges for a given base price ──────────────────────────────
 // Called internally by the pricing service and also exposed as a utility endpoint
-async function calculateSurcharges(basePrice, serviceType = 'STANDARD', options = {}) {
+async function calculateSurcharges(
+  basePrice,
+  serviceType = "STANDARD",
+  options = {},
+) {
   const surcharges = await prisma.surcharge.findMany({
     where: {
       isActive: true,
-      OR: [
-        { appliesTo: 'ALL' },
-        { appliesTo: serviceType },
-      ],
+      OR: [{ appliesTo: "ALL" }, { appliesTo: serviceType }],
     },
   });
 
@@ -105,12 +129,12 @@ async function calculateSurcharges(basePrice, serviceType = 'STANDARD', options 
 
   for (const s of surcharges) {
     // Skip fragile/insurance surcharges if not applicable
-    if (s.type === 'FRAGILE' && !options.isFragile) continue;
-    if (s.type === 'INSURANCE' && !options.requiresInsurance) continue;
+    if (s.type === "FRAGILE" && !options.isFragile) continue;
+    if (s.type === "INSURANCE" && !options.requiresInsurance) continue;
 
     let amount = 0;
     if (s.ratePercent) {
-      if (s.type === 'INSURANCE' && options.insuranceValue) {
+      if (s.type === "INSURANCE" && options.insuranceValue) {
         amount = Math.ceil(options.insuranceValue * (s.ratePercent / 100));
       } else {
         amount = Math.ceil(basePrice * (s.ratePercent / 100));
@@ -135,21 +159,27 @@ async function calculateSurcharges(basePrice, serviceType = 'STANDARD', options 
 
 // ─── GET surcharge calculation preview ───────────────────────────────────────
 async function previewSurcharges(req, res) {
-  const { basePrice, serviceType, isFragile, requiresInsurance, insuranceValue } = req.body;
+  const {
+    basePrice,
+    serviceType,
+    isFragile,
+    requiresInsurance,
+    insuranceValue,
+  } = req.body;
 
-  if (!basePrice) throw new ApiError(400, 'basePrice is required');
+  if (!basePrice) throw new ApiError(400, "basePrice is required");
 
   const result = await calculateSurcharges(
     parseFloat(basePrice),
-    serviceType || 'STANDARD',
-    { isFragile, requiresInsurance, insuranceValue }
+    serviceType || "STANDARD",
+    { isFragile, requiresInsurance, insuranceValue },
   );
 
   return success(res, {
     basePrice: parseFloat(basePrice),
     ...result,
     grandTotal: parseFloat(basePrice) + result.totalSurcharge,
-    currency: 'NGN',
+    currency: "NGN",
   });
 }
 
@@ -163,9 +193,11 @@ async function getPriceAuditLog(req, res) {
     where: entityType ? { entityType } : {},
     skip,
     take: limit,
-    orderBy: { createdAt: 'desc' },
+    orderBy: { createdAt: "desc" },
     include: {
-      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true },
+      },
     },
   });
 

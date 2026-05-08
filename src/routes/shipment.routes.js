@@ -469,6 +469,7 @@ router.get("/:id", shipmentController.getShipment);
  *       401:
  *         description: Unauthorized
  */
+router.get("/:id/cancel/preview", shipmentController.cancelPreview);
 router.post("/:id/cancel", shipmentController.cancelShipment);
 
 /**
