@@ -238,6 +238,8 @@ model City {
   toZones   ZoneMatrix[] @relation("ToCity")
   fromKm    KmMatrix[]   @relation("FromCityKm")
   toKm      KmMatrix[]   @relation("ToCityKm")
+  shipmentsFrom Shipment[] @relation("ShipmentFromCity")
+  shipmentsTo   Shipment[] @relation("ShipmentToCity")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -390,6 +392,8 @@ model Shipment {
   serviceType      ServiceType     @default(STANDARD)
   fromCityId       String?
   toCityId         String?
+  fromCity         City?           @relation("ShipmentFromCity", fields: [fromCityId], references: [id])
+  toCity           City?           @relation("ShipmentToCity",   fields: [toCityId],   references: [id])
   zone             Int?
   distanceKm       Float?
   quotedPrice      Float
@@ -488,7 +492,10 @@ model PriceAdjustment {
   difference      Float
   reason          String
   actualWeightKg  Float?
+  // Legacy single image — kept for backward compatibility
   proofImageUrl   String?
+  // Multi-image support (up to 5 URLs stored as JSON array)
+  proofImageUrls  Json?
   isAcknowledged  Boolean   @default(false)
   acknowledgedAt  DateTime?
   isPaid          Boolean   @default(false)

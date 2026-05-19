@@ -5,7 +5,7 @@ const { initializePayment } = require('../services/paystack.service');
 
 // ─── Admin: Create price adjustment (weight discrepancy found at hub) ─────────
 async function createPriceAdjustment(req, res) {
-  const { shipmentId, adjustedPrice, reason, actualWeightKg, proofImageUrl } = req.body;
+  const { shipmentId, adjustedPrice, reason, actualWeightKg, proofImageUrl, proofImageUrls } = req.body;
 
   const shipment = await prisma.shipment.findUnique({
     where: { id: shipmentId },
@@ -16,6 +16,16 @@ async function createPriceAdjustment(req, res) {
   const difference = adjustedPrice - shipment.quotedPrice;
   if (difference <= 0) throw new ApiError(400, 'Adjusted price must be higher than quoted price');
 
+  // Support both single image (legacy) and multiple images array
+  // proofImageUrls takes precedence; fall back to wrapping proofImageUrl in an array
+  let imageUrls = null;
+  if (proofImageUrls && Array.isArray(proofImageUrls) && proofImageUrls.length > 0) {
+    if (proofImageUrls.length > 5) throw new ApiError(400, 'Maximum 5 proof images allowed');
+    imageUrls = proofImageUrls;
+  } else if (proofImageUrl) {
+    imageUrls = [proofImageUrl];
+  }
+
   const adjustment = await prisma.priceAdjustment.create({
     data: {
       shipmentId,
@@ -24,7 +34,10 @@ async function createPriceAdjustment(req, res) {
       difference,
       reason,
       actualWeightKg,
-      proofImageUrl,
+      // Legacy field: first image for backward compat
+      proofImageUrl: imageUrls?.[0] || null,
+      // New field: full array
+      proofImageUrls: imageUrls || null,
     },
   });
 
@@ -46,7 +59,8 @@ async function createPriceAdjustment(req, res) {
         adjustmentId: adjustment.id,
         difference,
         adjustedPrice,
-        proofImageUrl,
+        proofImageUrl: imageUrls?.[0] || null,
+        proofImageUrls: imageUrls,
       },
     },
   });

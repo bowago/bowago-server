@@ -22,11 +22,25 @@ async function getZone(fromCityName, toCityName) {
   if (!fromCity) throw new ApiError(400, `Origin city "${fromCityName}" not found. Check GET /pricing/cities`);
   if (!toCity)   throw new ApiError(400, `Destination city "${toCityName}" not found. Check GET /pricing/cities`);
 
-  const matrix = await prisma.zoneMatrix.findUnique({
-    where: { fromCityId_toCityId: { fromCityId: fromCity.id, toCityId: toCity.id } },
+  // Only use active routes — paused routes are excluded from pricing
+  const matrix = await prisma.zoneMatrix.findFirst({
+    where: {
+      fromCityId: fromCity.id,
+      toCityId:   toCity.id,
+      isActive:   true,
+    },
   });
 
-  if (!matrix) throw new ApiError(400, `No route found between "${fromCityName}" and "${toCityName}"`);
+  if (!matrix) {
+    // Check if the route exists but is paused
+    const paused = await prisma.zoneMatrix.findFirst({
+      where: { fromCityId: fromCity.id, toCityId: toCity.id, isActive: false },
+    });
+    if (paused) {
+      throw new ApiError(400, `Route "${fromCityName}" → "${toCityName}" is temporarily unavailable. Please contact support.`);
+    }
+    throw new ApiError(400, `No route found between "${fromCityName}" and "${toCityName}". This city pair has not been configured yet.`);
+  }
 
   return { zone: matrix.zone, fromCity, toCity };
 }
@@ -282,9 +296,15 @@ async function calculateShippingCost({
   });
 
   // 7. Surcharges on top of discounted base price
+  // Auto-calculate insuranceValue if requiresInsurance but no value provided.
+  // Business rule: insure at 110% of the final base price (declared goods value estimate).
+  const resolvedInsuranceValue = (requiresInsurance && (!insuranceValue || insuranceValue <= 0))
+    ? Math.ceil(finalBasePrice * 1.1)
+    : insuranceValue;
+
   const { breakdown: surchargeBreakdown, totalSurcharge } = await applySurcharges(
     finalBasePrice, serviceType,
-    { isFragile, requiresInsurance, insuranceValue }
+    { isFragile, requiresInsurance, insuranceValue: resolvedInsuranceValue }
   );
 
   const total = finalBasePrice + totalSurcharge;
@@ -306,6 +326,9 @@ async function calculateShippingCost({
     totalSurcharge,
     total,
     currency: 'NGN',
+    // Insurance: resolved value used for calculation (auto-calculated if not provided)
+    insuranceValue: requiresInsurance ? resolvedInsuranceValue : null,
+    insuranceAutoCalculated: requiresInsurance && (!insuranceValue || insuranceValue <= 0),
   };
 }
 

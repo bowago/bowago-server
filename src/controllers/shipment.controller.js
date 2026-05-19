@@ -40,10 +40,10 @@ async function createShipment(req, res) {
     pickupDate,
   } = req.body;
 
-  // Calculate quote — pass null instead of 0 for unused weight fields
-  // insuranceValue and surcharges are handled inside calculateShippingCost
+  // insuranceValue: frontend can omit entirely — backend auto-calculates at 110% of base price.
+  // If frontend provides it, use that value (customer declared value takes precedence).
   const resolvedInsuranceValue = requiresInsurance
-    ? insuranceValue || null // frontend can omit; surcharge engine uses declared value or falls back to base rate
+    ? (insuranceValue || null)  // null tells pricing service to auto-calculate
     : 0;
 
   const quote = await calculateShippingCost({
@@ -108,6 +108,8 @@ async function createShipment(req, res) {
     },
     include: {
       trackingHistory: true,
+      fromCity: { select: { id: true, name: true, region: true, state: true } },
+      toCity:   { select: { id: true, name: true, region: true, state: true } },
     },
   });
 
@@ -175,6 +177,8 @@ async function getShipment(req, res) {
       assignedTo: {
         select: { id: true, firstName: true, lastName: true },
       },
+      fromCity: { select: { id: true, name: true, region: true, state: true } },
+      toCity:   { select: { id: true, name: true, region: true, state: true } },
       trackingHistory: { orderBy: { createdAt: "asc" } },
       documents: true,
     },
@@ -480,6 +484,8 @@ async function adminListShipments(req, res) {
           select: { id: true, firstName: true, lastName: true, phone: true },
         },
         assignedTo: { select: { id: true, firstName: true, lastName: true } },
+        fromCity: { select: { id: true, name: true, state: true } },
+        toCity:   { select: { id: true, name: true, state: true } },
         trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
       },
     }),

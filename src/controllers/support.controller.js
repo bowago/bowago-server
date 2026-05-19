@@ -44,9 +44,23 @@ function generateTicketNumber() {
 
 // ─── Customer: Create ticket ──────────────────────────────────────────────────
 async function createTicket(req, res) {
-  const { subject, category, shipmentId, body } = req.body;
+  const { subject, category, shipmentId, trackingNumber, body } = req.body;
   // Priority is admin-controlled only — customers always start at NORMAL
-  // Admins can escalate via the update ticket endpoint
+
+  // Resolve shipmentId from trackingNumber if provided
+  let resolvedShipmentId = shipmentId || null;
+  if (!resolvedShipmentId && trackingNumber) {
+    const shipment = await prisma.shipment.findUnique({
+      where: { trackingNumber: trackingNumber.trim().toUpperCase() },
+      select: { id: true, customerId: true },
+    });
+    if (!shipment) throw new ApiError(404, `No shipment found with tracking number "${trackingNumber}"`);
+    // Customers can only raise tickets for their own shipments
+    if (req.user.role === 'CUSTOMER' && shipment.customerId !== req.user.id) {
+      throw new ApiError(403, 'You can only raise tickets for your own shipments');
+    }
+    resolvedShipmentId = shipment.id;
+  }
 
   const assignedToId = await autoAssignTicket(category);
 
@@ -56,7 +70,7 @@ async function createTicket(req, res) {
       customerId: req.user.id,
       subject,
       category: category || "OTHER",
-      shipmentId,
+      shipmentId: resolvedShipmentId,
       priority: "NORMAL", // always NORMAL on creation; admin escalates if needed
       assignedToId,
       messages: {

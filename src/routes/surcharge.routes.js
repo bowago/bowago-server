@@ -16,12 +16,28 @@ const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('..
  *     summary: List all surcharges
  *     tags: [Surcharges]
  *     security: []
- *     description: Returns all active surcharges with their labels and descriptions. Used to render the transparent quote breakdown on the frontend.
+ *     description: Returns surcharges with full fields including isActive. Used to render the transparent quote breakdown on the frontend.
  *     parameters:
+ *       - in: query
+ *         name: isActive
+ *         schema: { type: boolean }
+ *         description: "Filter by active/inactive status. true = only active, false = only inactive. Omit to return all."
  *       - in: query
  *         name: active
  *         schema: { type: boolean }
- *         description: Pass true to return only active surcharges
+ *         description: "Legacy alias for isActive. Prefer isActive."
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [FUEL, REMOTE_AREA, VAT, FRAGILE, INSURANCE, OVERSIZE]
+ *         description: "Filter by surcharge type"
+ *       - in: query
+ *         name: appliesTo
+ *         schema:
+ *           type: string
+ *           enum: [ALL, EXPRESS, STANDARD, ECONOMY]
+ *         description: "Filter by service type the surcharge applies to"
  *     responses:
  *       200:
  *         description: Surcharges returned
@@ -46,6 +62,9 @@ const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('..
  *                           ratePercent: { type: number, example: 5.5 }
  *                           flatAmount: { type: number, nullable: true }
  *                           appliesTo: { type: string, example: ALL }
+ *                           isActive: { type: boolean, example: true, description: "Whether this surcharge is currently applied in quotes" }
+ *                           createdAt: { type: string, format: date-time }
+ *                           updatedAt: { type: string, format: date-time }
  */
 router.get('/', surchargeController.listSurcharges);
 
