@@ -1,7 +1,7 @@
 // ─── admin.routes.js ──────────────────────────────────────────────────────────
 const adminRouter = require('express').Router();
 const adminController = require('../controllers/admin.controller');
-const { authenticate, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireSuperAdmin, requireAuditLogAccess } = require('../middleware/auth');
 
 /**
  * @swagger

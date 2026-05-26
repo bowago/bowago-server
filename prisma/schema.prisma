@@ -16,8 +16,16 @@ enum UserRole {
 }
 
 enum AdminSubRole {
-  LOGISTICS_MANAGER
-  SUPER_ADMIN
+  // BowaGO internal staff roles (SUPER_ADMIN creates/assigns these)
+  SUPER_ADMIN           // Full system access — creates custom admin roles
+  LOGISTICS_MANAGER     // Legacy: maps to ROLE_ADMIN in PRD v2 — kept for FE compat
+  // PRD v2 roles — custom admin roles assignable by SUPER_ADMIN
+  ROLE_ADMIN            // Defined role given by SUPER_ADMIN (capabilities set in AdminRolePermission)
+  ROLE_AGENT            // CS rep: read/update tickets, read shipments, create notes, view customers
+  ROLE_MASTER           // Company master: manage team, assign roles, view all company data
+  ROLE_DISPATCHER       // Company team: create shipments, update status, read invoices
+  ROLE_FINANCE          // Company accountant: view invoices, create payments, view reports
+  ROLE_USER             // End customer — same as CUSTOMER role but via company context
 }
 
 enum AuthProvider {
@@ -73,6 +81,21 @@ enum ServiceType {
   EXPRESS
   STANDARD
   ECONOMY
+}
+
+
+enum QuoteStatus {
+  GENERATED
+  EXPIRED
+  BOOKED
+  CANCELLED
+}
+
+enum ConsentType {
+  TERMS_OF_SERVICE
+  REFUND_POLICY
+  SHIPPING_RULES
+  INSURANCE_TERMS
 }
 
 enum SurchargeType {
@@ -160,6 +183,10 @@ model User {
   claims              Claim[]
   supportTickets      SupportTicket[]      @relation("TicketCustomer")
   assignedTickets     SupportTicket[]      @relation("TicketAgent")
+  rolePermission      AdminRolePermission? @relation("UserRolePermission")
+  createdRolePerms    AdminRolePermission[] @relation("RolePermissionCreator")
+  quotes              Quote[]              @relation("UserQuotes")
+  consentLogs         ConsentLog[]         @relation("UserConsents")
   priceAuditLogs      PriceAuditLog[]
   contractRate       ContractRate?
   promoRedemptions   PromoRedemption[]
@@ -422,6 +449,7 @@ model Shipment {
   addressChangeReqs AddressChangeRequest[]
   claims           Claim[]
   priceAdjustments PriceAdjustment[]
+  quote            Quote?
 
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
@@ -818,3 +846,105 @@ model PackagingGuide {
 
   @@map("packaging_guides")
 }
+
+// ─── CUSTOM ADMIN ROLE PERMISSIONS (Sprint 2) ─────────────────────────────────
+// SUPER_ADMIN creates custom admin roles with specific capability flags.
+// One record per admin user — defines their capabilities.
+model AdminRolePermission {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  // Capability flags — SUPER_ADMIN toggles these per staff member
+  canManageRates          Boolean @default(false)
+  canManageUsers          Boolean @default(false)
+  canManageShipments      Boolean @default(false)
+  canViewAnalytics        Boolean @default(false)
+  canManageTickets        Boolean @default(false)
+  canManageInvoices       Boolean @default(false)
+  canManageSurcharges     Boolean @default(false)
+  canManagePromos         Boolean @default(false)
+  canManageClaims         Boolean @default(false)
+  canBulkNotify           Boolean @default(false)
+  canViewAuditLogs        Boolean @default(false)
+  canManageOrganization   Boolean @default(false)
+  // Role label (e.g. "Rate Manager", "CS Lead")
+  roleLabel        String?
+  notes            String?
+  createdBy        String
+  updatedBy        String?
+
+  user             User     @relation("UserRolePermission", fields: [userId], references: [id])
+  creator          User     @relation("RolePermissionCreator", fields: [createdBy], references: [id])
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("admin_role_permissions")
+}
+
+// ─── QUOTE LIFECYCLE (Sprint 1 gap fix) ──────────────────────────────────────
+// Quotes are valid for exactly 15 minutes. Immutable once locked.
+model Quote {
+  id                    String      @id @default(uuid())
+  userId                String?     // null = guest quote
+  status                QuoteStatus @default(GENERATED)
+  // Origin / Destination
+  originCity            String
+  originCityId          String?
+  destinationCity       String
+  destinationCityId     String?
+  zone                  Int?
+  distanceKm            Float?
+  // Weight
+  weightKg              Float?
+  volumetricWeightKg    Float?
+  billableWeightKg      Float?
+  lengthCm              Float?
+  widthCm               Float?
+  heightCm              Float?
+  // Pricing
+  serviceType           ServiceType @default(STANDARD)
+  basePriceKobo         Int         // stored in kobo to avoid float errors
+  fuelSurchargeKobo     Int         @default(0)
+  remoteAreaFeeKobo     Int         @default(0)
+  vatKobo               Int         @default(0)
+  totalPriceKobo        Int
+  // Insurance
+  insuranceSelected     Boolean     @default(false)
+  declaredValueKobo     Int?
+  insurancePremiumKobo  Int?
+  // Promo
+  promoCode             String?
+  promoDiscountKobo     Int?
+  // Lifecycle timestamps
+  expiresAt             DateTime    // createdAt + 15 min
+  bookedAt              DateTime?
+  cancelledAt           DateTime?
+  // Linked shipment (once booked)
+  shipmentId            String?     @unique
+  shipment              Shipment?   @relation(fields: [shipmentId], references: [id])
+
+  user                  User?       @relation("UserQuotes", fields: [userId], references: [id])
+
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  @@map("quotes")
+}
+
+// ─── CONSENT LOG (Sprint 7) ───────────────────────────────────────────────────
+// Immutable audit of user consent at quote/payment/booking time.
+model ConsentLog {
+  id            String      @id @default(uuid())
+  userId        String?
+  sessionId     String?     // for guest consent
+  consentType   ConsentType
+  tcVersion     String      // e.g. "v1.2"
+  acceptedAt    DateTime    @default(now())
+  ipAddress     String?
+  userAgent     String?
+
+  user          User?       @relation("UserConsents", fields: [userId], references: [id])
+
+  @@map("consent_logs")
+}
+

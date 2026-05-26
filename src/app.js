@@ -25,6 +25,8 @@ const delayAlertRoutes = require("./routes/delayAlert.routes");
 const invoiceRoutes = require("./routes/invoice.routes");
 const contractRateRoutes = require("./routes/contractRate.routes");
 const promoRateRoutes = require("./routes/promoRate.routes");
+const quoteRoutes = require("./routes/quote.routes");
+const adminRoleRoutes = require("./routes/adminRole.routes");
 
 const app = express();
 
@@ -214,6 +216,8 @@ app.use("/api/v1/delay-alerts", delayAlertRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
 app.use("/api/v1/contract-rates", contractRateRoutes);
 app.use("/api/v1/promo-rates", promoRateRoutes);
+app.use("/api/v1/quotes", quoteRoutes);
+app.use("/api/v1/admin/roles", adminRoleRoutes);
 
 app.get("/", (req, res) => {
   res.status(200).json({

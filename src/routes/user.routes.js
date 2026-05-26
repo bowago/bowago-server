@@ -330,7 +330,7 @@ router.patch('/:id/status', authenticate, requireAdmin, userController.toggleUse
  *             properties:
  *               adminSubRole:
  *                 type: string
- *                 enum: [LOGISTICS_MANAGER, SUPER_ADMIN]
+ *                 enum: [SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_ADMIN, ROLE_AGENT, ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER]
  *                 example: LOGISTICS_MANAGER
  *     responses:
  *       200:
