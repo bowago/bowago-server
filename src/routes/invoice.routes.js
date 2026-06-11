@@ -118,6 +118,44 @@ router.get('/my', invoiceController.myInvoices);
  */
 router.get('/financial-overview', requireLogisticsOrAbove, invoiceController.financialOverview);
 
+
+/**
+ * @swagger
+ * /invoices/admin:
+ *   get:
+ *     summary: Admin — list all invoices across all customers
+ *     tags: [Invoices]
+ *     description: >
+ *       Returns a paginated list of all payment records across all users.
+ *       Supports filtering by status, userId, and date range.
+ *       Admin/Logistics access required.
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [PENDING, PAID, FAILED, REFUNDED] }
+ *       - in: query
+ *         name: userId
+ *         schema: { type: string, format: uuid }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *     responses:
+ *       200:
+ *         description: Invoice list returned
+ *       403:
+ *         description: Admin access required
+ */
+router.get('/admin', requireLogisticsOrAbove, invoiceController.adminListInvoices);
+
 /**
  * @swagger
  * /invoices/{paymentId}:

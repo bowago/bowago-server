@@ -1,19 +1,28 @@
-const bcrypt = require('bcryptjs');
-const { prisma } = require('../config/db');
-const { deleteFromCloudinary } = require('../config/cloudinary');
-const { ApiError } = require('../utils/ApiError');
-const { success, getPagination, buildMeta } = require('../utils/helpers');
+const bcrypt = require("bcryptjs");
+const { prisma } = require("../config/db");
+const { deleteFromCloudinary } = require("../config/cloudinary");
+const { ApiError } = require("../utils/ApiError");
+const { success, getPagination, buildMeta } = require("../utils/helpers");
 
 // ─── GET PROFILE ──────────────────────────────────────────────────────────────
 async function getProfile(req, res) {
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
     select: {
-      id: true, email: true, phone: true, firstName: true, lastName: true,
-      avatar: true, role: true, adminSubRole: true, authProvider: true,
-      isEmailVerified: true, isPhoneVerified: true, isActive: true,
+      id: true,
+      email: true,
+      phone: true,
+      firstName: true,
+      lastName: true,
+      avatar: true,
+      role: true,
+      adminSubRole: true,
+      authProvider: true,
+      isEmailVerified: true,
+      isPhoneVerified: true,
+      isActive: true,
       createdAt: true,
-      addresses: { orderBy: { isDefault: 'desc' } },
+      addresses: { orderBy: { isDefault: "desc" } },
     },
   });
   return success(res, { user });
@@ -27,24 +36,32 @@ async function updateProfile(req, res) {
     const exists = await prisma.user.findFirst({
       where: { phone, NOT: { id: req.user.id } },
     });
-    if (exists) throw new ApiError(409, 'Phone number already in use');
+    if (exists) throw new ApiError(409, "Phone number already in use");
   }
 
   const user = await prisma.user.update({
     where: { id: req.user.id },
     data: { firstName, lastName, phone },
     select: {
-      id: true, email: true, phone: true, firstName: true, lastName: true, avatar: true,
-      role: true, adminSubRole: true, isEmailVerified: true, isPhoneVerified: true,
+      id: true,
+      email: true,
+      phone: true,
+      firstName: true,
+      lastName: true,
+      avatar: true,
+      role: true,
+      adminSubRole: true,
+      isEmailVerified: true,
+      isPhoneVerified: true,
     },
   });
 
-  return success(res, { user }, 'Profile updated');
+  return success(res, { user }, "Profile updated");
 }
 
 // ─── UPLOAD AVATAR ────────────────────────────────────────────────────────────
 async function uploadAvatar(req, res) {
-  if (!req.file) throw new ApiError(400, 'No image uploaded');
+  if (!req.file) throw new ApiError(400, "No image uploaded");
 
   // Delete old avatar
   const currentUser = await prisma.user.findUnique({
@@ -61,12 +78,13 @@ async function uploadAvatar(req, res) {
     select: { id: true, avatar: true },
   });
 
-  return success(res, { avatar: user.avatar }, 'Avatar updated');
+  return success(res, { avatar: user.avatar }, "Avatar updated");
 }
 
 // ─── ADDRESSES ────────────────────────────────────────────────────────────────
 async function addAddress(req, res) {
-  const { label, street, city, state, lga, postalCode, isDefault, lat, lng } = req.body;
+  const { label, street, city, state, lga, postalCode, isDefault, lat, lng } =
+    req.body;
 
   if (isDefault) {
     await prisma.address.updateMany({
@@ -76,10 +94,21 @@ async function addAddress(req, res) {
   }
 
   const address = await prisma.address.create({
-    data: { userId: req.user.id, label, street, city, state, lga, postalCode, isDefault: !!isDefault, lat, lng },
+    data: {
+      userId: req.user.id,
+      label,
+      street,
+      city,
+      state,
+      lga,
+      postalCode,
+      isDefault: !!isDefault,
+      lat,
+      lng,
+    },
   });
 
-  return success(res, { address }, 'Address added', 201);
+  return success(res, { address }, "Address added", 201);
 }
 
 async function updateAddress(req, res) {
@@ -88,9 +117,10 @@ async function updateAddress(req, res) {
   const existing = await prisma.address.findFirst({
     where: { id, userId: req.user.id },
   });
-  if (!existing) throw new ApiError(404, 'Address not found');
+  if (!existing) throw new ApiError(404, "Address not found");
 
-  const { label, street, city, state, lga, postalCode, isDefault, lat, lng } = req.body;
+  const { label, street, city, state, lga, postalCode, isDefault, lat, lng } =
+    req.body;
 
   if (isDefault) {
     await prisma.address.updateMany({
@@ -101,10 +131,20 @@ async function updateAddress(req, res) {
 
   const address = await prisma.address.update({
     where: { id },
-    data: { label, street, city, state, lga, postalCode, isDefault: !!isDefault, lat, lng },
+    data: {
+      label,
+      street,
+      city,
+      state,
+      lga,
+      postalCode,
+      isDefault: !!isDefault,
+      lat,
+      lng,
+    },
   });
 
-  return success(res, { address }, 'Address updated');
+  return success(res, { address }, "Address updated");
 }
 
 async function deleteAddress(req, res) {
@@ -113,10 +153,10 @@ async function deleteAddress(req, res) {
   const existing = await prisma.address.findFirst({
     where: { id, userId: req.user.id },
   });
-  if (!existing) throw new ApiError(404, 'Address not found');
+  if (!existing) throw new ApiError(404, "Address not found");
 
   await prisma.address.delete({ where: { id } });
-  return success(res, {}, 'Address deleted');
+  return success(res, {}, "Address deleted");
 }
 
 // ─── ADMIN: LIST USERS ────────────────────────────────────────────────────────
@@ -126,12 +166,12 @@ async function listUsers(req, res) {
 
   const where = {
     ...(role && { role }),
-    ...(isActive !== undefined && { isActive: isActive === 'true' }),
+    ...(isActive !== undefined && { isActive: isActive === "true" }),
     ...(search && {
       OR: [
-        { email: { contains: search, mode: 'insensitive' } },
-        { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: "insensitive" } },
+        { firstName: { contains: search, mode: "insensitive" } },
+        { lastName: { contains: search, mode: "insensitive" } },
         { phone: { contains: search } },
       ],
     }),
@@ -142,18 +182,30 @@ async function listUsers(req, res) {
       where,
       skip,
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       select: {
-        id: true, email: true, phone: true, firstName: true, lastName: true,
-        avatar: true, role: true, adminSubRole: true, isActive: true,
-        isEmailVerified: true, createdAt: true,
+        id: true,
+        email: true,
+        phone: true,
+        firstName: true,
+        lastName: true,
+        avatar: true,
+        role: true,
+        adminSubRole: true,
+        isActive: true,
+        isEmailVerified: true,
+        createdAt: true,
         _count: { select: { shipments: true } },
       },
     }),
     prisma.user.count({ where }),
   ]);
 
-  return res.json({ success: true, data: { users }, meta: buildMeta(total, page, limit) });
+  return res.json({
+    success: true,
+    data: { users },
+    meta: buildMeta(total, page, limit),
+  });
 }
 
 // ─── ADMIN: TOGGLE USER STATUS ────────────────────────────────────────────────
@@ -161,7 +213,7 @@ async function toggleUserStatus(req, res) {
   const { id } = req.params;
 
   const user = await prisma.user.findUnique({ where: { id } });
-  if (!user) throw new ApiError(404, 'User not found');
+  if (!user) throw new ApiError(404, "User not found");
 
   const updated = await prisma.user.update({
     where: { id },
@@ -169,7 +221,11 @@ async function toggleUserStatus(req, res) {
     select: { id: true, isActive: true, email: true },
   });
 
-  return success(res, { user: updated }, `User ${updated.isActive ? 'activated' : 'suspended'}`);
+  return success(
+    res,
+    { user: updated },
+    `User ${updated.isActive ? "activated" : "suspended"}`,
+  );
 }
 
 // ─── ADMIN: SET ADMIN ROLE ────────────────────────────────────────────────────
@@ -179,11 +235,81 @@ async function setAdminRole(req, res) {
 
   const user = await prisma.user.update({
     where: { id },
-    data: { role: 'ADMIN', adminSubRole: adminSubRole || null },
+    data: { role: "ADMIN", adminSubRole: adminSubRole || null },
     select: { id: true, email: true, role: true, adminSubRole: true },
   });
 
-  return success(res, { user }, 'Admin role updated');
+  return success(res, { user }, "Admin role updated");
+}
+
+// ─── ADMIN: GET USER BY ID ────────────────────────────────────────────────────
+async function getUserById(req, res) {
+  const { id } = req.params;
+
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      email: true,
+      phone: true,
+      firstName: true,
+      lastName: true,
+      avatar: true,
+      role: true,
+      adminSubRole: true,
+      authProvider: true,
+      isActive: true,
+      isEmailVerified: true,
+      isPhoneVerified: true,
+      createdAt: true,
+      updatedAt: true,
+      addresses: { orderBy: { isDefault: "desc" } },
+      _count: { select: { shipments: true } },
+    },
+  });
+
+  if (!user) throw new ApiError(404, "User not found");
+
+  // Fetch recent shipments
+  const shipments = await prisma.shipment.findMany({
+    where: { userId: id },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: {
+      id: true,
+      trackingNumber: true,
+      status: true,
+      paymentStatus: true,
+      quotedPrice: true,
+      senderCity: true,
+      recipientCity: true,
+      createdAt: true,
+    },
+  });
+
+  return success(res, { user, shipments });
+}
+
+// ─── ADMIN: DELETE USER ───────────────────────────────────────────────────────
+async function deleteUser(req, res) {
+  const { id } = req.params;
+
+  // Prevent self-deletion
+  if (id === req.user.id) {
+    throw new ApiError(400, "You cannot delete your own account");
+  }
+
+  const user = await prisma.user.findUnique({ where: { id } });
+  if (!user) throw new ApiError(404, "User not found");
+
+  // Prevent deletion of other SUPER_ADMINs
+  if (user.adminSubRole === "SUPER_ADMIN") {
+    throw new ApiError(403, "Cannot delete another Super Admin");
+  }
+
+  await prisma.user.delete({ where: { id } });
+
+  return success(res, {}, "User deleted successfully");
 }
 
 module.exports = {
@@ -196,4 +322,6 @@ module.exports = {
   listUsers,
   toggleUserStatus,
   setAdminRole,
+  getUserById,
+  deleteUser,
 };

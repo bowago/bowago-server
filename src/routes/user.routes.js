@@ -1,7 +1,11 @@
-const router = require('express').Router();
-const userController = require('../controllers/user.controller');
-const { authenticate, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
-const { uploadAvatar } = require('../config/cloudinary');
+const router = require("express").Router();
+const userController = require("../controllers/user.controller");
+const {
+  authenticate,
+  requireAdmin,
+  requireSuperAdmin,
+} = require("../middleware/auth");
+const { uploadAvatar } = require("../config/cloudinary");
 
 /**
  * @swagger
@@ -41,7 +45,7 @@ const { uploadAvatar } = require('../config/cloudinary');
  *       401:
  *         description: Unauthorized
  */
-router.get('/me', authenticate, userController.getProfile);
+router.get("/me", authenticate, userController.getProfile);
 
 /**
  * @swagger
@@ -78,7 +82,7 @@ router.get('/me', authenticate, userController.getProfile);
  *       401:
  *         description: Unauthorized
  */
-router.patch('/me', authenticate, userController.updateProfile);
+router.patch("/me", authenticate, userController.updateProfile);
 
 /**
  * @swagger
@@ -117,7 +121,12 @@ router.patch('/me', authenticate, userController.updateProfile);
  *       401:
  *         description: Unauthorized
  */
-router.post('/me/avatar', authenticate, uploadAvatar.single('avatar'), userController.uploadAvatar);
+router.post(
+  "/me/avatar",
+  authenticate,
+  uploadAvatar.single("avatar"),
+  userController.uploadAvatar,
+);
 
 /**
  * @swagger
@@ -159,7 +168,7 @@ router.post('/me/avatar', authenticate, uploadAvatar.single('avatar'), userContr
  *       401:
  *         description: Unauthorized
  */
-router.post('/me/addresses', authenticate, userController.addAddress);
+router.post("/me/addresses", authenticate, userController.addAddress);
 
 /**
  * @swagger
@@ -196,7 +205,7 @@ router.post('/me/addresses', authenticate, userController.addAddress);
  *       401:
  *         description: Unauthorized
  */
-router.put('/me/addresses/:id', authenticate, userController.updateAddress);
+router.put("/me/addresses/:id", authenticate, userController.updateAddress);
 
 /**
  * @swagger
@@ -218,7 +227,7 @@ router.put('/me/addresses/:id', authenticate, userController.updateAddress);
  *       401:
  *         description: Unauthorized
  */
-router.delete('/me/addresses/:id', authenticate, userController.deleteAddress);
+router.delete("/me/addresses/:id", authenticate, userController.deleteAddress);
 
 /**
  * @swagger
@@ -267,7 +276,7 @@ router.delete('/me/addresses/:id', authenticate, userController.deleteAddress);
  *       403:
  *         description: Admin access required
  */
-router.get('/', authenticate, requireAdmin, userController.listUsers);
+router.get("/", authenticate, requireAdmin, userController.listUsers);
 
 /**
  * @swagger
@@ -305,7 +314,12 @@ router.get('/', authenticate, requireAdmin, userController.listUsers);
  *       403:
  *         description: Admin access required
  */
-router.patch('/:id/status', authenticate, requireAdmin, userController.toggleUserStatus);
+router.patch(
+  "/:id/status",
+  authenticate,
+  requireAdmin,
+  userController.toggleUserStatus,
+);
 
 /**
  * @swagger
@@ -351,6 +365,58 @@ router.patch('/:id/status', authenticate, requireAdmin, userController.toggleUse
  *       404:
  *         description: User not found
  */
-router.patch('/:id/role', authenticate, requireSuperAdmin, userController.setAdminRole);
+router.patch(
+  "/:id/role",
+  authenticate,
+  requireSuperAdmin,
+  userController.setAdminRole,
+);
+
+/**
+ * @swagger
+ * /users/{id}:
+ *   get:
+ *     summary: Get user by ID (Admin)
+ *     tags: [Users]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: User detail with shipment history
+ *       404:
+ *         description: User not found
+ */
+router.get("/:id", authenticate, requireAdmin, userController.getUserById);
+
+/**
+ * @swagger
+ * /users/{id}:
+ *   delete:
+ *     summary: Delete user (Super Admin only)
+ *     tags: [Users]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: User deleted
+ *       400:
+ *         description: Cannot delete own account
+ *       403:
+ *         description: Cannot delete another Super Admin
+ *       404:
+ *         description: User not found
+ */
+router.delete(
+  "/:id",
+  authenticate,
+  requireSuperAdmin,
+  userController.deleteUser,
+);
 
 module.exports = router;

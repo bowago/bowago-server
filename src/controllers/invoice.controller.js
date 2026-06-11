@@ -340,6 +340,7 @@ async function financialOverview(req, res) {
 
 module.exports = {
   myInvoices,
+  adminListInvoices,
   getInvoice,
   downloadInvoicePDF,
   emailInvoice,
@@ -347,3 +348,64 @@ module.exports = {
   downloadBookingConfirmation,
   financialOverview,
 };
+
+// ─── GET /invoices/admin — Admin list of all invoices ─────────────────────────
+async function adminListInvoices(req, res) {
+  const { page, limit, skip } = getPagination(req.query);
+  const { status, userId, fromDate, toDate } = req.query;
+
+  const where = {
+    ...(status && { status }),
+    ...(userId && { userId }),
+    ...((fromDate || toDate) && {
+      createdAt: {
+        ...(fromDate && { gte: new Date(fromDate) }),
+        ...(toDate && { lte: new Date(toDate) }),
+      },
+    }),
+  };
+
+  const [payments, total] = await Promise.all([
+    prisma.payment.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, email: true } },
+        shipment: {
+          select: {
+            id: true,
+            trackingNumber: true,
+            senderCity: true,
+            recipientCity: true,
+            status: true,
+            quotedPrice: true,
+          },
+        },
+      },
+    }),
+    prisma.payment.count({ where }),
+  ]);
+
+  const invoices = payments.map((p) => ({
+    invoiceNumber: `INV-${buildInvoiceNumber(p)}`,
+    paymentId: p.id,
+    reference: p.reference,
+    amount: p.amountKobo / 100,
+    currency: p.currency,
+    status: p.status,
+    channel: p.channel,
+    paidAt: p.paidAt,
+    createdAt: p.createdAt,
+    user: p.user,
+    shipment: p.shipment,
+  }));
+
+  return res.json({
+    success: true,
+    message: 'Invoices retrieved',
+    data: { invoices },
+    meta: buildMeta(total, page, limit),
+  });
+}
