@@ -233,6 +233,7 @@ router.post('/cities', pricingController.upsertCity);
  *       403:
  *         description: Super admin access required
  */
+router.patch('/cities/:id', requireSuperAdmin, pricingController.updateCity);
 router.delete('/cities/:id', requireSuperAdmin, pricingController.deleteCity);
 
 /**
@@ -552,6 +553,7 @@ router.patch('/zone-matrix/:id/reinstate', pricingController.reinstateZoneMatrix
  *       403:
  *         description: Super Admin access required
  */
+router.patch('/zone-matrix/:id', requireSuperAdmin, pricingController.updateZoneMatrix);
 router.delete('/zone-matrix/:id', requireSuperAdmin, pricingController.deleteZoneMatrix);
 
 /**

@@ -65,6 +65,22 @@ async function upsertCity(req, res) {
   return created(res, { city }, 'City saved');
 }
 
+async function updateCity(req, res) {
+  const { id } = req.params;
+  const { name, region, state } = req.body;
+  const existing = await prisma.city.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, 'City not found');
+  const city = await prisma.city.update({
+    where: { id },
+    data: {
+      ...(name   && { name }),
+      ...(region && { region }),
+      ...(state  && { state }),
+    },
+  });
+  return success(res, { city }, 'City updated');
+}
+
 async function deleteCity(req, res) {
   await prisma.city.delete({ where: { id: req.params.id } });
   return success(res, {}, 'City deleted');
@@ -244,6 +260,20 @@ async function upsertZoneMatrix(req, res) {
     include: { fromCity: true, toCity: true },
   });
   return created(res, { record }, 'Zone matrix updated');
+}
+
+async function updateZoneMatrix(req, res) {
+  const { id } = req.params;
+  const { zone } = req.body;
+  const existing = await prisma.zoneMatrix.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, 'Zone matrix entry not found');
+  if (zone === undefined || zone === null) throw new ApiError(400, 'zone number is required');
+  const record = await prisma.zoneMatrix.update({
+    where: { id },
+    data: { zone: parseInt(zone) },
+    include: { fromCity: true, toCity: true },
+  });
+  return success(res, { record }, `Zone ${record.fromCity.name} → ${record.toCity.name} updated to Zone ${record.zone}`);
 }
 
 // ─── ZONE MATRIX: Pause / Reinstate ───────────────────────────────────────────
@@ -623,10 +653,10 @@ async function importPricingSheet(req, res) {
 }
 
 module.exports = {
-  getQuote, listCities, upsertCity, deleteCity,
+  getQuote, listCities, upsertCity, updateCity, deleteCity,
   listDimensions, upsertDimension, deleteDimension,
   listPriceBands, createPriceBand, updatePriceBand, deletePriceBand,
-  getZoneMatrix, upsertZoneMatrix, pauseZoneMatrix, reinstateZoneMatrix, deleteZoneMatrix,
+  getZoneMatrix, upsertZoneMatrix, updateZoneMatrix, pauseZoneMatrix, reinstateZoneMatrix, deleteZoneMatrix,
   getPricingStats,
   rollbackPriceBand, importPricingSheet,
 };
