@@ -367,6 +367,7 @@ async function importPricingSheet(req, res) {
 
   const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
   const results = { cities: 0, zones: 0, km: 0, priceBands: 0, dimensions: 0, errors: [] };
+  const importerId = req.user?.id ?? null;
 
   // Dimensions sheet
   if (workbook.SheetNames.includes('Dimensions')) {
@@ -393,6 +394,61 @@ async function importPricingSheet(req, res) {
     }
   }
 
+  // ─── Build city → region/state map ────────────────────────────────────────
+  // Known Nigerian city → state lookup so imported cities get real metadata
+  const knownCityStates = {
+    'Abuja': 'FCT', 'Jos': 'Plateau', 'Lafia': 'Nasarawa', 'Lokoja': 'Kogi',
+    'Makurdi': 'Benue', 'Minna': 'Niger', 'Ilorin': 'Kwara',
+    'Bauchi': 'Bauchi', 'Damaturu': 'Yobe', 'Gombe': 'Gombe',
+    'Jalingo': 'Taraba', 'Maiduguri': 'Borno', 'Yola': 'Adamawa',
+    'Birnin Kebbi': 'Kebbi', 'Dutse': 'Jigawa', 'Gusau': 'Zamfara',
+    'Kaduna': 'Kaduna', 'Kano': 'Kano', 'Katsina': 'Katsina',
+    'Sokoto': 'Sokoto', 'Zaria': 'Kaduna',
+    'Aba': 'Abia', 'Abakaliki': 'Ebonyi', 'Awka': 'Anambra',
+    'Enugu': 'Enugu', 'Owerri': 'Imo', 'Umuahia': 'Abia',
+    'Asaba': 'Delta', 'Benin City': 'Edo', 'Calabar': 'Cross River',
+    'Port Harcourt': 'Rivers', 'Uyo': 'Akwa Ibom', 'Yenagoa': 'Bayelsa',
+    'Abeokuta': 'Ogun', 'Ado-Ekiti': 'Ekiti', 'Akure': 'Ondo',
+    'Ibadan': 'Oyo', 'Ife': 'Osun', 'Lagos': 'Lagos', 'Lagos City': 'Lagos',
+  };
+  const stateRegionMap = {
+    'FCT': 'North Central', 'Plateau': 'North Central', 'Nasarawa': 'North Central',
+    'Kogi': 'North Central', 'Kwara': 'North Central', 'Benue': 'North Central', 'Niger': 'North Central',
+    'Bauchi': 'North East', 'Yobe': 'North East', 'Gombe': 'North East',
+    'Taraba': 'North East', 'Borno': 'North East', 'Adamawa': 'North East',
+    'Kebbi': 'North West', 'Jigawa': 'North West', 'Zamfara': 'North West',
+    'Kaduna': 'North West', 'Kano': 'North West', 'Katsina': 'North West', 'Sokoto': 'North West',
+    'Abia': 'South East', 'Ebonyi': 'South East', 'Anambra': 'South East',
+    'Enugu': 'South East', 'Imo': 'South East',
+    'Delta': 'South South', 'Edo': 'South South', 'Cross River': 'South South',
+    'Rivers': 'South South', 'Akwa Ibom': 'South South', 'Bayelsa': 'South South',
+    'Ogun': 'South West', 'Ekiti': 'South West', 'Ondo': 'South West',
+    'Oyo': 'South West', 'Osun': 'South West', 'Lagos': 'South West',
+  };
+
+  // Build per-city lookup: first try "Zone Matrix by Region" sheet, then fall back to knownCityStates
+  const cityRegionMap = {};
+  if (workbook.SheetNames.includes('Zone Matrix by Region')) {
+    const regSheet = XLSX.utils.sheet_to_json(workbook.Sheets['Zone Matrix by Region'], { header: 1 });
+    let currentRegion = '';
+    for (let i = 1; i < regSheet.length; i++) {
+      const row = regSheet[i];
+      if (!row || (!row[0] && !row[1])) continue;
+      if (row[0] && typeof row[0] === 'string' && row[0].trim()) currentRegion = row[0].trim();
+      const cityName = row[1] ? String(row[1]).trim() : null;
+      if (cityName && currentRegion) {
+        const state = knownCityStates[cityName] ?? currentRegion;
+        cityRegionMap[cityName] = { region: currentRegion, state };
+      }
+    }
+  }
+  // Fill in any cities not found in the region sheet
+  for (const [cityName, state] of Object.entries(knownCityStates)) {
+    if (!cityRegionMap[cityName]) {
+      cityRegionMap[cityName] = { region: stateRegionMap[state] ?? 'Unknown', state };
+    }
+  }
+
   // Zone Matrix sheet
   if (workbook.SheetNames.includes('Zone Matrix')) {
     const sheet = XLSX.utils.sheet_to_json(workbook.Sheets['Zone Matrix'], { header: 1 });
@@ -404,9 +460,12 @@ async function importPricingSheet(req, res) {
 
     for (const cityName of allCityNames) {
       if (!cityName || typeof cityName !== 'string') continue;
+      const meta = cityRegionMap[cityName.trim()] ?? { region: 'Unknown', state: 'Unknown' };
       const city = await prisma.city.upsert({
         where: { name: cityName.trim() },
-        update: {}, create: { name: cityName.trim(), region: 'Unknown', state: 'Unknown' },
+        // Always update so existing "Unknown" records get corrected on re-import
+        update: { region: meta.region, state: meta.state },
+        create: { name: cityName.trim(), region: meta.region, state: meta.state },
       });
       cityMap[cityName.trim()] = city.id;
       results.cities++;
@@ -474,6 +533,88 @@ async function importPricingSheet(req, res) {
           });
           results.km++;
         } catch (e) { results.errors.push(`KM ${fromCityName}->${toCityName}: ${e.message}`); }
+      }
+    }
+  }
+
+  // ─── Price sheet → priceBand records ─────────────────────────────────────
+  // Expected columns: KG (range like "50 -200"), Tons, Cartons, Zone (numeric)
+  // Zone column only appears on the first row of each zone block; subsequent
+  // rows for the same zone have null in the Zone column.
+  if (workbook.SheetNames.includes('Price')) {
+    const sheet = XLSX.utils.sheet_to_json(workbook.Sheets['Price'], { header: 1 });
+
+    // Find the header row (row with "KG" in first column)
+    let dataStart = -1;
+    for (let i = 0; i < sheet.length; i++) {
+      if (sheet[i] && String(sheet[i][0]).trim().toUpperCase() === 'KG') {
+        dataStart = i + 1;
+        break;
+      }
+    }
+
+    if (dataStart > 0) {
+      let currentZone = null;
+
+      for (let i = dataStart; i < sheet.length; i++) {
+        const row = sheet[i];
+        if (!row || !row[0]) continue;
+
+        // Zone column is col index 3; propagate downward when null
+        if (row[3] !== null && row[3] !== undefined && row[3] !== '') {
+          currentZone = parseInt(row[3]);
+        }
+        if (!currentZone) continue;
+
+        // Parse weight range from the KG column e.g. "50 -200", "201 - 500", "2001 and Above"
+        const kgStr = String(row[0]).trim();
+        let minKg = null;
+        let maxKg = null;
+
+        const rangeMatch = kgStr.match(/^([\d,]+)\s*[-–]\s*([\d,]+)/);
+        const aboveMatch = kgStr.match(/^([\d,]+)\s+and\s+above/i);
+
+        if (rangeMatch) {
+          minKg = parseFloat(rangeMatch[1].replace(',', ''));
+          maxKg = parseFloat(rangeMatch[2].replace(',', ''));
+        } else if (aboveMatch) {
+          minKg = parseFloat(aboveMatch[1].replace(',', ''));
+          maxKg = null; // open-ended upper bound
+        } else {
+          results.errors.push(`Price row ${i}: could not parse KG range "${kgStr}"`);
+          continue;
+        }
+
+        // Create a price band for each service type (EXPRESS, STANDARD, ECONOMY)
+        // The Excel doesn't differentiate by service type, so we create one per type
+        // using a placeholder pricePerKg; admins can update individual bands after import.
+        // We do NOT overwrite if a specific pricePerKg already exists (only create missing bands).
+        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
+          try {
+            const existing = await prisma.priceBand.findFirst({
+              where: { zone: currentZone, serviceType, minKg, maxKg },
+            });
+
+            if (!existing) {
+              await prisma.priceBand.create({
+                data: {
+                  zone: currentZone,
+                  serviceType,
+                  minKg,
+                  maxKg,
+                  // Placeholder — 0 so admin can see the band exists and set real prices
+                  pricePerKg: 0,
+                  basePrice: 0,
+                  isActive: true,
+                  ...(importerId ? { createdBy: importerId } : {}),
+                },
+              });
+              results.priceBands++;
+            }
+          } catch (e) {
+            results.errors.push(`PriceBand zone${currentZone} ${serviceType} ${kgStr}: ${e.message}`);
+          }
+        }
       }
     }
   }

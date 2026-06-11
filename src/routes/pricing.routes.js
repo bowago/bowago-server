@@ -464,7 +464,7 @@ router.post('/zone-matrix', pricingController.upsertZoneMatrix);
  *       403:
  *         description: Admin access required
  */
-router.post('/import', uploadImport.single('file'), pricingController.importPricingSheet);
+router.post('/import', authenticate, requireAdmin, uploadImport.single('file'), pricingController.importPricingSheet);
 
 
 /**
