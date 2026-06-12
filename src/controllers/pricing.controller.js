@@ -57,10 +57,20 @@ async function listCities(req, res) {
 
 async function upsertCity(req, res) {
   const { name, region, state } = req.body;
-  const city = await prisma.city.upsert({
-    where: { name },
-    update: { region, state },
-    create: { name, region, state },
+  const trimmedName = String(name ?? '').trim();
+  if (!trimmedName) throw new ApiError(400, 'City name is required');
+
+  // Case-insensitive duplicate check — prevents "Lagos" vs "lagos" vs "LAGOS"
+  const existing = await prisma.city.findFirst({
+    where: { name: { equals: trimmedName, mode: 'insensitive' } },
+  });
+
+  if (existing) {
+    throw new ApiError(409, `A city named "${existing.name}" already exists. Edit it instead of creating a duplicate.`);
+  }
+
+  const city = await prisma.city.create({
+    data: { name: trimmedName, region, state },
   });
   return created(res, { city }, 'City saved');
 }
@@ -68,12 +78,30 @@ async function upsertCity(req, res) {
 async function updateCity(req, res) {
   const { id } = req.params;
   const { name, region, state } = req.body;
+
   const existing = await prisma.city.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, 'City not found');
+
+  if (name) {
+    const trimmedName = String(name).trim();
+    if (!trimmedName) throw new ApiError(400, 'City name cannot be empty');
+
+    // Case-insensitive duplicate check, excluding this city itself
+    const duplicate = await prisma.city.findFirst({
+      where: {
+        name: { equals: trimmedName, mode: 'insensitive' },
+        id: { not: id },
+      },
+    });
+    if (duplicate) {
+      throw new ApiError(409, `A city named "${duplicate.name}" already exists. Choose a different name.`);
+    }
+  }
+
   const city = await prisma.city.update({
     where: { id },
     data: {
-      ...(name   && { name }),
+      ...(name   && { name: String(name).trim() }),
       ...(region && { region }),
       ...(state  && { state }),
     },
@@ -82,8 +110,48 @@ async function updateCity(req, res) {
 }
 
 async function deleteCity(req, res) {
-  await prisma.city.delete({ where: { id: req.params.id } });
-  return success(res, {}, 'City deleted');
+  const { id } = req.params;
+  const force = req.query.force === 'true' || req.query.force === '1';
+
+  const existing = await prisma.city.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, 'City not found');
+
+  // Count everything that references this city
+  const [zoneAsFrom, zoneAsTo, kmAsFrom, kmAsTo] = await Promise.all([
+    prisma.zoneMatrix.count({ where: { fromCityId: id } }),
+    prisma.zoneMatrix.count({ where: { toCityId: id } }),
+    prisma.kmMatrix.count({ where: { fromCityId: id } }),
+    prisma.kmMatrix.count({ where: { toCityId: id } }),
+  ]);
+
+  const zoneRoutes = zoneAsFrom + zoneAsTo;
+  const kmRoutes = kmAsFrom + kmAsTo;
+  const totalDependents = zoneRoutes + kmRoutes;
+
+  if (totalDependents > 0 && !force) {
+    // Don't hard-delete blindly — tell the frontend exactly what's attached
+    // so it can show a clear, human-readable confirmation instead of a
+    // raw Prisma error.
+    return res.status(409).json({
+      success: false,
+      code: 'CITY_HAS_DEPENDENTS',
+      message: `"${existing.name}" is used in ${zoneRoutes} zone matrix route(s) and ${kmRoutes} distance (KM) route(s). Deleting it will also remove those routes.`,
+      data: {
+        city: { id: existing.id, name: existing.name },
+        dependents: { zoneRoutes, kmRoutes, total: totalDependents },
+      },
+    });
+  }
+
+  // Either no dependents, or admin explicitly confirmed force=true.
+  // Clean up dependent rows first to satisfy FK constraints, then delete the city.
+  await prisma.$transaction([
+    prisma.zoneMatrix.deleteMany({ where: { OR: [{ fromCityId: id }, { toCityId: id }] } }),
+    prisma.kmMatrix.deleteMany({ where: { OR: [{ fromCityId: id }, { toCityId: id }] } }),
+    prisma.city.delete({ where: { id } }),
+  ]);
+
+  return success(res, {}, `"${existing.name}" and ${totalDependents} associated route(s) deleted`);
 }
 
 // ─── BOX DIMENSIONS ───────────────────────────────────────────────────────────
