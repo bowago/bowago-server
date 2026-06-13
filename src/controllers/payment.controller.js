@@ -7,6 +7,10 @@ const {
 } = require("../services/paystack.service");
 const { ApiError } = require("../utils/ApiError");
 const { success, getPagination, buildMeta } = require("../utils/helpers");
+const {
+  processWebhookWithRetry,
+  replayDeadLetter,
+} = require("../services/webhook.service");
 
 // ─── Initialize Payment ───────────────────────────────────────────────────────
 async function initPayment(req, res) {
@@ -74,7 +78,8 @@ async function verifyPaymentHandler(req, res) {
 async function webhook(req, res) {
   const signature = req.headers["x-paystack-signature"];
 
-  // Always respond 200 first so Paystack doesn't retry
+  // Always respond 200 first so Paystack doesn't retry on its own schedule —
+  // we handle retries ourselves via processWebhookWithRetry below.
   res.status(200).json({ received: true });
 
   if (!verifyWebhookSignature(req.body, signature)) {
@@ -84,21 +89,17 @@ async function webhook(req, res) {
 
   const { event, data } = req.body;
 
-  try {
-    if (event === "charge.success") {
+  if (event === "charge.success") {
+    await processWebhookWithRetry(event, req.body, async () => {
       await verifyPayment(data.reference);
-      console.log(`✅ Webhook: Payment ${data.reference} confirmed`);
-    }
-
-    if (event === "refund.processed") {
-      console.log(
-        `✅ Webhook: Refund processed for ${data.transaction_reference}`,
-      );
-      // Refund already handled in refundPayment(), just log here
-    }
-  } catch (err) {
-    console.error("Webhook processing error:", err.message);
+    });
+  } else if (event === "refund.processed") {
+    await processWebhookWithRetry(event, req.body, async () => {
+      // Refund already handled in refundPayment(); this just confirms via webhook.
+      console.log(`Refund processed for ${data.transaction_reference}`);
+    });
   }
+  // Unrecognized events are acknowledged (200 already sent) but not processed.
 }
 
 // ─── Paystack callback (browser redirect after payment) ───────────────────────
@@ -255,6 +256,62 @@ async function paymentStats(req, res) {
   });
 }
 
+// ─── ADMIN: List failed webhooks (Dead Letter Queue) ───────────────────────────
+async function listFailedWebhooks(req, res) {
+  const { page, limit, skip } = getPagination(req.query);
+  const { status } = req.query;
+
+  const where = { ...(status && { status }) };
+
+  const [items, total] = await Promise.all([
+    prisma.failedWebhook.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+    }),
+    prisma.failedWebhook.count({ where }),
+  ]);
+
+  return success(res, { items, meta: buildMeta(total, page, limit) });
+}
+
+// ─── ADMIN: Retry a failed webhook ──────────────────────────────────────────────
+async function retryFailedWebhook(req, res) {
+  const { id } = req.params;
+
+  const handlerMap = {
+    "charge.success": async (payload) => {
+      await verifyPayment(payload.data.reference);
+    },
+    "refund.processed": async (payload) => {
+      console.log(`Refund processed for ${payload.data.transaction_reference}`);
+    },
+  };
+
+  const result = await replayDeadLetter(id, handlerMap);
+
+  if (!result.success) {
+    throw new ApiError(400, `Retry failed: ${result.error}`);
+  }
+
+  return success(res, {}, "Webhook re-processed successfully");
+}
+
+// ─── ADMIN: Dismiss a failed webhook (mark as ignored) ─────────────────────────
+async function dismissFailedWebhook(req, res) {
+  const { id } = req.params;
+  const entry = await prisma.failedWebhook.findUnique({ where: { id } });
+  if (!entry) throw new ApiError(404, "DLQ entry not found");
+
+  await prisma.failedWebhook.update({
+    where: { id },
+    data: { status: "IGNORED", resolvedAt: new Date() },
+  });
+
+  return success(res, {}, "Webhook entry dismissed");
+}
+
 module.exports = {
   initPayment,
   verifyPaymentHandler,
@@ -264,4 +321,7 @@ module.exports = {
   myPayments,
   adminListPayments,
   paymentStats,
+  listFailedWebhooks,
+  retryFailedWebhook,
+  dismissFailedWebhook,
 };

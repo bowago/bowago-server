@@ -231,7 +231,32 @@ async function toggleUserStatus(req, res) {
 // ─── ADMIN: SET ADMIN ROLE ────────────────────────────────────────────────────
 async function setAdminRole(req, res) {
   const { id } = req.params;
-  const { adminSubRole } = req.body;
+  const { adminSubRole, role } = req.body;
+
+  if (id === req.user.id) {
+    throw new ApiError(400, "You cannot change your own role");
+  }
+
+  const target = await prisma.user.findUnique({
+    where: { id },
+    select: { adminSubRole: true },
+  });
+  if (!target) throw new ApiError(404, "User not found");
+  if (target.adminSubRole === "SUPER_ADMIN") {
+    throw new ApiError(403, "Cannot change another SUPER_ADMIN's role");
+  }
+
+  // Demote back to a regular customer — clears ADMIN role + sub-role +
+  // any custom capability record.
+  if (role === "CUSTOMER" || adminSubRole === "CUSTOMER") {
+    const user = await prisma.user.update({
+      where: { id },
+      data: { role: "CUSTOMER", adminSubRole: null },
+      select: { id: true, email: true, role: true, adminSubRole: true },
+    });
+    await prisma.adminRolePermission.deleteMany({ where: { userId: id } });
+    return success(res, { user }, "User reverted to CUSTOMER role");
+  }
 
   const user = await prisma.user.update({
     where: { id },
@@ -272,7 +297,7 @@ async function getUserById(req, res) {
 
   // Fetch recent shipments
   const shipments = await prisma.shipment.findMany({
-    where: { userId: id },
+    where: { customerId: id },
     orderBy: { createdAt: "desc" },
     take: 10,
     select: {

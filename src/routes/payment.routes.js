@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const paymentController = require('../controllers/payment.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -318,5 +318,64 @@ router.get('/', requireLogisticsOrAbove, paymentController.adminListPayments);
  *         description: Admin access required
  */
 router.get('/stats', requireLogisticsOrAbove, paymentController.paymentStats);
+
+/**
+ * @swagger
+ * /payments/webhooks/failed:
+ *   get:
+ *     summary: List failed webhook events (Dead Letter Queue) — Super Admin
+ *     tags: [Payments]
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [FAILED, RESOLVED, IGNORED] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: List of failed webhook events
+ */
+router.get('/webhooks/failed', requireSuperAdmin, paymentController.listFailedWebhooks);
+
+/**
+ * @swagger
+ * /payments/webhooks/failed/{id}/retry:
+ *   post:
+ *     summary: Re-process a failed webhook event — Super Admin
+ *     tags: [Payments]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Webhook re-processed successfully
+ *       400:
+ *         description: Retry failed — see error message
+ */
+router.post('/webhooks/failed/:id/retry', requireSuperAdmin, paymentController.retryFailedWebhook);
+
+/**
+ * @swagger
+ * /payments/webhooks/failed/{id}/dismiss:
+ *   post:
+ *     summary: Dismiss a failed webhook event without retrying — Super Admin
+ *     tags: [Payments]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Webhook entry dismissed
+ */
+router.post('/webhooks/failed/:id/dismiss', requireSuperAdmin, paymentController.dismissFailedWebhook);
+
 
 module.exports = router;

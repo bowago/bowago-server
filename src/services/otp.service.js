@@ -4,7 +4,7 @@ const { generateOtp } = require('../utils/helpers');
 const { ApiError } = require('../utils/ApiError');
 
 const OTP_EXPIRES_MINUTES = parseInt(process.env.OTP_EXPIRES_MINUTES) || 10;
-const MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS) || 5;
+const MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS) || 3;
 
 async function sendOtp(userId, email, type) {
   // Invalidate any existing unused OTPs of same type
@@ -37,15 +37,16 @@ async function verifyOtp(userId, code, type) {
 
   if (!otp) throw new ApiError(400, 'Invalid or expired verification code');
 
-  // Increment attempts
+  // Reject if the attempt limit was already reached on a previous try
+  if (otp.attempts >= MAX_ATTEMPTS) {
+    throw new ApiError(400, 'Too many failed attempts. Please request a new code.');
+  }
+
+  // Increment attempts for this try
   await prisma.otpCode.update({
     where: { id: otp.id },
     data: { attempts: { increment: 1 } },
   });
-
-  if (otp.attempts >= MAX_ATTEMPTS) {
-    throw new ApiError(400, 'Too many failed attempts. Please request a new code.');
-  }
 
   if (otp.code !== code) {
     throw new ApiError(400, 'Invalid verification code');

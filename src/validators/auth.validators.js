@@ -1,8 +1,8 @@
 const Joi = require('joi');
 
-const password = Joi.string().min(8).max(128)
+const password = Joi.string().min(12).max(128)
   .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-  .message('Password must be at least 8 characters with uppercase, lowercase, and number');
+  .message('Password must be at least 12 characters with uppercase, lowercase, and number');
 
 const registerSchema = Joi.object({
   email: Joi.string().email().lowercase().required(),

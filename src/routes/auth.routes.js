@@ -1,8 +1,8 @@
-const router = require('express').Router();
-const rateLimit = require('express-rate-limit');
-const authController = require('../controllers/auth.controller');
-const { authenticate } = require('../middleware/auth');
-const { validateBody } = require('../middleware/validate');
+const router = require("express").Router();
+const rateLimit = require("express-rate-limit");
+const authController = require("../controllers/auth.controller");
+const { authenticate } = require("../middleware/auth");
+const { validateBody } = require("../middleware/validate");
 const {
   registerSchema,
   loginSchema,
@@ -13,12 +13,19 @@ const {
   changePasswordSchema,
   googleAuthSchema,
   appleAuthSchema,
-} = require('../validators/auth.validators');
+  login2FASchema,
+  setup2FASchema,
+  verify2FASchema,
+  disable2FASchema,
+} = require("../validators/auth.validators");
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
-  message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
+  message: {
+    success: false,
+    message: "Too many auth attempts. Try again in 15 minutes.",
+  },
 });
 
 /**
@@ -88,7 +95,12 @@ const authLimiter = rateLimit({
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/register', authLimiter, validateBody(registerSchema), authController.register);
+router.post(
+  "/register",
+  authLimiter,
+  validateBody(registerSchema),
+  authController.register,
+);
 
 /**
  * @swagger
@@ -136,7 +148,11 @@ router.post('/register', authLimiter, validateBody(registerSchema), authControll
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/verify-email', validateBody(verifyEmailSchema), authController.verifyEmail);
+router.post(
+  "/verify-email",
+  validateBody(verifyEmailSchema),
+  authController.verifyEmail,
+);
 
 /**
  * @swagger
@@ -171,7 +187,12 @@ router.post('/verify-email', validateBody(verifyEmailSchema), authController.ver
  *       404:
  *         description: User not found
  */
-router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), authController.resendOtp);
+router.post(
+  "/resend-otp",
+  authLimiter,
+  validateBody(resendOtpSchema),
+  authController.resendOtp,
+);
 
 /**
  * @swagger
@@ -216,7 +237,142 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), authContr
  *       403:
  *         description: Email not verified — a new OTP has been sent
  */
-router.post('/login', authLimiter, validateBody(loginSchema), authController.login);
+router.post(
+  "/login",
+  authLimiter,
+  validateBody(loginSchema),
+  authController.login,
+);
+
+/**
+ * @swagger
+ * /auth/login-2fa:
+ *   post:
+ *     summary: Complete login with 2FA code
+ *     tags: [Auth]
+ *     security: []
+ *     description: >
+ *       If POST /auth/login responds with `requires2FA: true`, a 6-digit code
+ *       has been emailed to the user. Submit it here (with email) to receive
+ *       access/refresh tokens. Max 3 attempts, 10-minute expiry.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, otp]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               otp: { type: string, example: "123456" }
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *       400:
+ *         description: Invalid or expired code
+ */
+router.post(
+  "/login-2fa",
+  authLimiter,
+  validateBody(login2FASchema),
+  authController.verifyLogin2FA,
+);
+
+/**
+ * @swagger
+ * /auth/setup-2fa:
+ *   post:
+ *     summary: Begin enabling two-factor authentication
+ *     tags: [Auth]
+ *     description: >
+ *       Sends a 6-digit confirmation code to the authenticated user's email.
+ *       Currently only `method: "EMAIL"` is supported (SMS provider not yet configured).
+ *       Follow up with POST /auth/verify-2fa to complete setup.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [method]
+ *             properties:
+ *               method: { type: string, enum: [EMAIL, SMS], example: EMAIL }
+ *     responses:
+ *       200:
+ *         description: Verification code sent
+ *       400:
+ *         description: Unsupported method
+ */
+router.post(
+  "/setup-2fa",
+  authenticate,
+  validateBody(setup2FASchema),
+  authController.setup2FA,
+);
+
+/**
+ * @swagger
+ * /auth/verify-2fa:
+ *   post:
+ *     summary: Confirm and enable two-factor authentication
+ *     tags: [Auth]
+ *     description: Verifies the code sent by POST /auth/setup-2fa and enables 2FA on the account.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [otp]
+ *             properties:
+ *               otp: { type: string, example: "123456" }
+ *     responses:
+ *       200:
+ *         description: Two-factor authentication enabled
+ *       400:
+ *         description: Invalid or expired code
+ */
+router.post(
+  "/verify-2fa",
+  authenticate,
+  validateBody(verify2FASchema),
+  authController.verify2FA,
+);
+
+/**
+ * @swagger
+ * /auth/disable-2fa:
+ *   post:
+ *     summary: Disable two-factor authentication
+ *     tags: [Auth]
+ *     description: Requires the account password to confirm.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [password]
+ *             properties:
+ *               password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Two-factor authentication disabled
+ *       401:
+ *         description: Incorrect password
+ */
+router.post(
+  "/disable-2fa",
+  authenticate,
+  validateBody(disable2FASchema),
+  authController.disable2FA,
+);
 
 /**
  * @swagger
@@ -256,7 +412,11 @@ router.post('/login', authLimiter, validateBody(loginSchema), authController.log
  *       401:
  *         description: Invalid Google token
  */
-router.post('/google', validateBody(googleAuthSchema), authController.googleAuth);
+router.post(
+  "/google",
+  validateBody(googleAuthSchema),
+  authController.googleAuth,
+);
 
 /**
  * @swagger
@@ -306,7 +466,7 @@ router.post('/google', validateBody(googleAuthSchema), authController.googleAuth
  *       401:
  *         description: Invalid Apple token
  */
-router.post('/apple', validateBody(appleAuthSchema), authController.appleAuth);
+router.post("/apple", validateBody(appleAuthSchema), authController.appleAuth);
 
 /**
  * @swagger
@@ -339,7 +499,7 @@ router.post('/apple', validateBody(appleAuthSchema), authController.appleAuth);
  *       401:
  *         description: Invalid, expired, or already revoked refresh token
  */
-router.post('/refresh', authController.refreshToken);
+router.post("/refresh", authController.refreshToken);
 
 /**
  * @swagger
@@ -369,7 +529,12 @@ router.post('/refresh', authController.refreshToken);
  *             schema:
  *               $ref: '#/components/schemas/SuccessResponse'
  */
-router.post('/forgot-password', authLimiter, validateBody(forgotPasswordSchema), authController.forgotPassword);
+router.post(
+  "/forgot-password",
+  authLimiter,
+  validateBody(forgotPasswordSchema),
+  authController.forgotPassword,
+);
 
 /**
  * @swagger
@@ -405,7 +570,11 @@ router.post('/forgot-password', authLimiter, validateBody(forgotPasswordSchema),
  *       404:
  *         description: User not found
  */
-router.post('/reset-password', validateBody(resetPasswordSchema), authController.resetPassword);
+router.post(
+  "/reset-password",
+  validateBody(resetPasswordSchema),
+  authController.resetPassword,
+);
 
 /**
  * @swagger
@@ -436,7 +605,12 @@ router.post('/reset-password', validateBody(resetPasswordSchema), authController
  *       401:
  *         description: Unauthorized
  */
-router.post('/change-password', authenticate, validateBody(changePasswordSchema), authController.changePassword);
+router.post(
+  "/change-password",
+  authenticate,
+  validateBody(changePasswordSchema),
+  authController.changePassword,
+);
 
 /**
  * @swagger
@@ -459,7 +633,7 @@ router.post('/change-password', authenticate, validateBody(changePasswordSchema)
  *       401:
  *         description: Unauthorized
  */
-router.post('/logout', authenticate, authController.logout);
+router.post("/logout", authenticate, authController.logout);
 
 /**
  * @swagger
@@ -474,6 +648,6 @@ router.post('/logout', authenticate, authController.logout);
  *       401:
  *         description: Unauthorized
  */
-router.post('/logout-all', authenticate, authController.logoutAll);
+router.post("/logout-all", authenticate, authController.logoutAll);
 
 module.exports = router;

@@ -340,12 +340,16 @@ router.patch(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [adminSubRole]
  *             properties:
  *               adminSubRole:
  *                 type: string
- *                 enum: [SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_ADMIN, ROLE_AGENT, ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER]
+ *                 enum: [SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_ADMIN, ROLE_AGENT, ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER, CUSTOMER]
+ *                 description: Pass "CUSTOMER" (or set role:"CUSTOMER") to revoke admin access and revert to a regular customer.
  *                 example: LOGISTICS_MANAGER
+ *               role:
+ *                 type: string
+ *                 enum: [ADMIN, CUSTOMER]
+ *                 description: Optional. Set to "CUSTOMER" to demote an admin back to a regular customer.
  *     responses:
  *       200:
  *         description: Admin role updated

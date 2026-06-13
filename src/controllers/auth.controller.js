@@ -86,9 +86,87 @@ async function login(req, res) {
     throw new ApiError(403, 'Email not verified. A new code has been sent to your email.');
   }
 
+  // ─── 2FA challenge ──────────────────────────────────────────────────────
+  // If the user has 2FA enabled, don't issue tokens yet — send a one-time
+  // code and require POST /auth/login-2fa with { email, otp } to finish.
+  if (user.twoFactorEnabled) {
+    await sendOtp(user.id, email, 'TWO_FACTOR_LOGIN');
+    return success(res, {
+      requires2FA: true,
+      email: user.email,
+    }, 'Verification code sent to your email. Enter it to complete login.');
+  }
+
   const tokens = await generateTokenPair(user, req.headers['user-agent'], req.ip);
 
   return success(res, { user: safeUser(user), ...tokens }, 'Login successful');
+}
+
+// ─── COMPLETE LOGIN WITH 2FA CODE ──────────────────────────────────────────────
+async function verifyLogin2FA(req, res) {
+  const { email, otp } = req.body;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) throw new ApiError(401, 'Invalid email or code');
+  if (!user.isActive) throw new ApiError(403, 'Account suspended. Contact support.');
+
+  await verifyOtp(user.id, otp, 'TWO_FACTOR_LOGIN');
+
+  const tokens = await generateTokenPair(user, req.headers['user-agent'], req.ip);
+  return success(res, { user: safeUser(user), ...tokens }, 'Login successful');
+}
+
+// ─── 2FA SETUP — send confirmation code to chosen channel ─────────────────────
+async function setup2FA(req, res) {
+  const { method } = req.body; // 'EMAIL' | 'SMS'
+
+  if (!['EMAIL', 'SMS'].includes(method)) {
+    throw new ApiError(400, 'method must be "EMAIL" or "SMS"');
+  }
+  if (method === 'SMS') {
+    // SMS provider not yet configured — email 2FA is fully supported.
+    throw new ApiError(400, 'SMS 2FA is not available yet. Please use EMAIL.');
+  }
+
+  const user = req.user;
+  if (user.twoFactorEnabled) {
+    return success(res, { alreadyEnabled: true }, 'Two-factor authentication is already enabled');
+  }
+
+  await sendOtp(user.id, user.email, 'TWO_FACTOR_SETUP');
+  return success(res, { method }, 'Verification code sent to your email. Enter it to confirm 2FA setup.');
+}
+
+// ─── 2FA VERIFY — confirm setup with the code just sent ────────────────────────
+async function verify2FA(req, res) {
+  const { otp } = req.body;
+  if (!otp) throw new ApiError(400, 'otp is required');
+
+  await verifyOtp(req.user.id, otp, 'TWO_FACTOR_SETUP');
+
+  await prisma.user.update({
+    where: { id: req.user.id },
+    data: { twoFactorEnabled: true },
+  });
+
+  return success(res, { twoFactorEnabled: true }, 'Two-factor authentication enabled successfully');
+}
+
+// ─── 2FA DISABLE — requires current password ───────────────────────────────────
+async function disable2FA(req, res) {
+  const { password } = req.body;
+  if (!password) throw new ApiError(400, 'password is required to disable 2FA');
+
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  const isValid = await bcrypt.compare(password, user.passwordHash);
+  if (!isValid) throw new ApiError(401, 'Incorrect password');
+
+  await prisma.user.update({
+    where: { id: req.user.id },
+    data: { twoFactorEnabled: false },
+  });
+
+  return success(res, { twoFactorEnabled: false }, 'Two-factor authentication disabled');
 }
 
 // ─── GOOGLE OAUTH ─────────────────────────────────────────────────────────────
@@ -288,6 +366,10 @@ module.exports = {
   verifyEmail,
   resendOtp,
   login,
+  verifyLogin2FA,
+  setup2FA,
+  verify2FA,
+  disable2FA,
   googleAuth,
   appleAuth,
   refreshToken,

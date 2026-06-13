@@ -170,6 +170,7 @@ model User {
   isPhoneVerified  Boolean       @default(false)
   isActive         Boolean       @default(true)
   fcmToken         String?
+  twoFactorEnabled Boolean @default(false)
 
   addresses           Address[]
   shipments           Shipment[]           @relation("CustomerShipments")
@@ -947,4 +948,19 @@ model ConsentLog {
 
   @@map("consent_logs")
 }
+
+model FailedWebhook {
+        id            String    @id @default(uuid())
+        event         String    // e.g. "charge.success"
+        payload       Json      // full original webhook body, for replay
+        errorMessage  String?
+        attempts      Int       @default(0)
+        status        String    @default("FAILED") // FAILED | RESOLVED | IGNORED
+        createdAt     DateTime  @default(now())
+        lastRetriedAt DateTime?
+        resolvedAt    DateTime?
+
+        @@index([status])
+        @@index([event])
+      }
 
