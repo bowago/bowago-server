@@ -86,6 +86,93 @@ router.patch("/me", authenticate, userController.updateProfile);
 
 /**
  * @swagger
+ * /users/me/company:
+ *   patch:
+ *     summary: Update the authenticated user's company information
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               companyName:    { type: string }
+ *               industry:       { type: string }
+ *               companyEmail:   { type: string, format: email }
+ *               companyPhone:   { type: string }
+ *               companyWebsite: { type: string }
+ *               streetAddress:  { type: string }
+ *               city:           { type: string }
+ *               state:          { type: string }
+ *               country:        { type: string }
+ *               zipCode:        { type: string }
+ *     responses:
+ *       200:
+ *         description: Company information updated
+ */
+router.patch("/me/company", authenticate, userController.updateCompanyInfo);
+
+/**
+ * @swagger
+ * /users/me/saved-cards:
+ *   get:
+ *     summary: List the authenticated user's saved cards (Paystack reusable authorizations)
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of saved cards
+ */
+router.get("/me/saved-cards", authenticate, userController.listSavedCards);
+
+/**
+ * @swagger
+ * /users/me/saved-cards/{id}/default:
+ *   patch:
+ *     summary: Set a saved card as the default
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Default card updated
+ *       404:
+ *         description: Saved card not found
+ */
+router.patch("/me/saved-cards/:id/default", authenticate, userController.setDefaultCard);
+
+/**
+ * @swagger
+ * /users/me/saved-cards/{id}:
+ *   delete:
+ *     summary: Remove a saved card
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Card removed
+ *       404:
+ *         description: Saved card not found
+ */
+router.delete("/me/saved-cards/:id", authenticate, userController.deleteSavedCard);
+
+
+/**
+ * @swagger
  * /users/me/avatar:
  *   post:
  *     summary: Upload profile photo

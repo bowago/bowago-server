@@ -125,6 +125,33 @@ async function verifyPayment(reference) {
     },
   });
 
+  // Save the card for future use if Paystack marked the authorization
+  // reusable — this powers the Payment Method tab in Settings.
+  const auth = tx.authorization;
+  if (isPaid && auth?.reusable && auth?.authorization_code) {
+    const existingCount = await prisma.savedCard.count({ where: { userId: payment.userId } });
+    await prisma.savedCard.upsert({
+      where: { authorizationCode: auth.authorization_code },
+      update: {
+        last4: auth.last4,
+        cardType: auth.card_type,
+        bank: auth.bank,
+        expMonth: auth.exp_month,
+        expYear: auth.exp_year,
+      },
+      create: {
+        userId: payment.userId,
+        authorizationCode: auth.authorization_code,
+        last4: auth.last4,
+        cardType: auth.card_type,
+        bank: auth.bank,
+        expMonth: auth.exp_month,
+        expYear: auth.exp_year,
+        isDefault: existingCount === 0, // first saved card becomes default
+      },
+    });
+  }
+
   if (isPaid && payment.shipmentId) {
     // Update shipment
     await prisma.shipment.update({

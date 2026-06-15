@@ -3,6 +3,7 @@ const { OAuth2Client } = require('google-auth-library');
 const { prisma } = require('../config/db');
 const { generateTokenPair, verifyRefreshToken, revokeRefreshToken, revokeAllUserTokens } = require('../config/jwt');
 const { sendOtp, verifyOtp } = require('../services/otp.service');
+const { isConfigured: isSmsConfigured } = require('../services/sms.service');
 const { ApiError } = require('../utils/ApiError');
 const { success } = require('../utils/helpers');
 
@@ -12,6 +13,13 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 function safeUser(user) {
   const { passwordHash, ...safe } = user;
   return safe;
+}
+
+// Mask a phone number for display, e.g. "08012345678" -> "***45678"
+function maskPhone(phone) {
+  const digits = String(phone);
+  if (digits.length <= 4) return digits;
+  return '***' + digits.slice(-4);
 }
 
 // ─── REGISTER ─────────────────────────────────────────────────────────────────
@@ -90,7 +98,11 @@ async function login(req, res) {
   // If the user has 2FA enabled, don't issue tokens yet — send a one-time
   // code and require POST /auth/login-2fa with { email, otp } to finish.
   if (user.twoFactorEnabled) {
-    await sendOtp(user.id, email, 'TWO_FACTOR_LOGIN');
+    if (user.twoFactorMethod === 'SMS' && user.phone) {
+      await sendOtp(user.id, user.phone, 'TWO_FACTOR_LOGIN', 'SMS');
+    } else {
+      await sendOtp(user.id, email, 'TWO_FACTOR_LOGIN', 'EMAIL');
+    }
     return success(res, {
       requires2FA: true,
       email: user.email,
@@ -123,30 +135,40 @@ async function setup2FA(req, res) {
   if (!['EMAIL', 'SMS'].includes(method)) {
     throw new ApiError(400, 'method must be "EMAIL" or "SMS"');
   }
-  if (method === 'SMS') {
-    // SMS provider not yet configured — email 2FA is fully supported.
-    throw new ApiError(400, 'SMS 2FA is not available yet. Please use EMAIL.');
-  }
 
   const user = req.user;
   if (user.twoFactorEnabled) {
     return success(res, { alreadyEnabled: true }, 'Two-factor authentication is already enabled');
   }
 
-  await sendOtp(user.id, user.email, 'TWO_FACTOR_SETUP');
+  if (method === 'SMS') {
+    if (!isSmsConfigured()) {
+      throw new ApiError(400, 'SMS 2FA is not available yet. Please use EMAIL.');
+    }
+    if (!user.phone) {
+      throw new ApiError(400, 'Add a phone number to your profile before enabling SMS 2FA.');
+    }
+    await sendOtp(user.id, user.phone, 'TWO_FACTOR_SETUP', 'SMS');
+    return success(res, { method }, `Verification code sent to ${maskPhone(user.phone)}. Enter it to confirm 2FA setup.`);
+  }
+
+  await sendOtp(user.id, user.email, 'TWO_FACTOR_SETUP', 'EMAIL');
   return success(res, { method }, 'Verification code sent to your email. Enter it to confirm 2FA setup.');
 }
 
 // ─── 2FA VERIFY — confirm setup with the code just sent ────────────────────────
 async function verify2FA(req, res) {
-  const { otp } = req.body;
+  const { otp, method } = req.body;
   if (!otp) throw new ApiError(400, 'otp is required');
 
   await verifyOtp(req.user.id, otp, 'TWO_FACTOR_SETUP');
 
   await prisma.user.update({
     where: { id: req.user.id },
-    data: { twoFactorEnabled: true },
+    data: {
+      twoFactorEnabled: true,
+      twoFactorMethod: method === 'SMS' ? 'SMS' : 'EMAIL',
+    },
   });
 
   return success(res, { twoFactorEnabled: true }, 'Two-factor authentication enabled successfully');

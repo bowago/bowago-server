@@ -1,12 +1,19 @@
 const { prisma } = require('../config/db');
 const { sendOtpEmail } = require('../config/email');
+const { sendOtpSms } = require('./sms.service');
 const { generateOtp } = require('../utils/helpers');
 const { ApiError } = require('../utils/ApiError');
 
 const OTP_EXPIRES_MINUTES = parseInt(process.env.OTP_EXPIRES_MINUTES) || 10;
 const MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS) || 3;
 
-async function sendOtp(userId, email, type) {
+/**
+ * @param {string} userId
+ * @param {string} destination - email address (channel='EMAIL') or phone number (channel='SMS')
+ * @param {string} type - OTP purpose, e.g. 'EMAIL_VERIFY', 'TWO_FACTOR_LOGIN'
+ * @param {'EMAIL'|'SMS'} channel - delivery channel, defaults to EMAIL
+ */
+async function sendOtp(userId, destination, type, channel = 'EMAIL') {
   // Invalidate any existing unused OTPs of same type
   await prisma.otpCode.updateMany({
     where: { userId, type, usedAt: null },
@@ -20,7 +27,12 @@ async function sendOtp(userId, email, type) {
     data: { userId, code, type, expiresAt },
   });
 
-  await sendOtpEmail(email, code, type);
+  if (channel === 'SMS') {
+    await sendOtpSms(destination, code);
+  } else {
+    await sendOtpEmail(destination, code, type);
+  }
+
   return code;
 }
 

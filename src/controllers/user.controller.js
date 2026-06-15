@@ -22,6 +22,17 @@ async function getProfile(req, res) {
       isPhoneVerified: true,
       isActive: true,
       createdAt: true,
+      twoFactorEnabled: true,
+      companyName: true,
+      industry: true,
+      companyEmail: true,
+      companyPhone: true,
+      companyWebsite: true,
+      companyStreet: true,
+      companyCity: true,
+      companyState: true,
+      companyCountry: true,
+      companyZip: true,
       addresses: { orderBy: { isDefault: "desc" } },
     },
   });
@@ -57,6 +68,37 @@ async function updateProfile(req, res) {
   });
 
   return success(res, { user }, "Profile updated");
+}
+
+// ─── UPDATE COMPANY INFO ────────────────────────────────────────────────────
+async function updateCompanyInfo(req, res) {
+  const {
+    companyName, industry, companyEmail, companyPhone, companyWebsite,
+    streetAddress, city, state, country, zipCode,
+  } = req.body;
+
+  const user = await prisma.user.update({
+    where: { id: req.user.id },
+    data: {
+      ...(companyName    !== undefined && { companyName }),
+      ...(industry       !== undefined && { industry }),
+      ...(companyEmail   !== undefined && { companyEmail }),
+      ...(companyPhone   !== undefined && { companyPhone }),
+      ...(companyWebsite !== undefined && { companyWebsite }),
+      ...(streetAddress  !== undefined && { companyStreet: streetAddress }),
+      ...(city           !== undefined && { companyCity: city }),
+      ...(state          !== undefined && { companyState: state }),
+      ...(country        !== undefined && { companyCountry: country }),
+      ...(zipCode        !== undefined && { companyZip: zipCode }),
+    },
+    select: {
+      companyName: true, industry: true, companyEmail: true, companyPhone: true,
+      companyWebsite: true, companyStreet: true, companyCity: true,
+      companyState: true, companyCountry: true, companyZip: true,
+    },
+  });
+
+  return success(res, { company: user }, "Company information updated");
 }
 
 // ─── UPLOAD AVATAR ────────────────────────────────────────────────────────────
@@ -337,9 +379,65 @@ async function deleteUser(req, res) {
   return success(res, {}, "User deleted successfully");
 }
 
+// ─── SAVED CARDS ────────────────────────────────────────────────────────────
+// Cards are populated automatically by paystack.service.verifyPayment()
+// when a successful charge returns a reusable authorization.
+
+async function listSavedCards(req, res) {
+  const cards = await prisma.savedCard.findMany({
+    where: { userId: req.user.id },
+    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
+  });
+  return success(res, { cards });
+}
+
+async function setDefaultCard(req, res) {
+  const { id } = req.params;
+
+  const card = await prisma.savedCard.findFirst({
+    where: { id, userId: req.user.id },
+  });
+  if (!card) throw new ApiError(404, "Saved card not found");
+
+  await prisma.$transaction([
+    prisma.savedCard.updateMany({
+      where: { userId: req.user.id },
+      data: { isDefault: false },
+    }),
+    prisma.savedCard.update({ where: { id }, data: { isDefault: true } }),
+  ]);
+
+  return success(res, {}, "Default card updated");
+}
+
+async function deleteSavedCard(req, res) {
+  const { id } = req.params;
+
+  const card = await prisma.savedCard.findFirst({
+    where: { id, userId: req.user.id },
+  });
+  if (!card) throw new ApiError(404, "Saved card not found");
+
+  await prisma.savedCard.delete({ where: { id } });
+
+  // If we deleted the default card, promote the next most recent one
+  if (card.isDefault) {
+    const next = await prisma.savedCard.findFirst({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: "desc" },
+    });
+    if (next) {
+      await prisma.savedCard.update({ where: { id: next.id }, data: { isDefault: true } });
+    }
+  }
+
+  return success(res, {}, "Card removed");
+}
+
 module.exports = {
   getProfile,
   updateProfile,
+  updateCompanyInfo,
   uploadAvatar,
   addAddress,
   updateAddress,
@@ -349,4 +447,7 @@ module.exports = {
   setAdminRole,
   getUserById,
   deleteUser,
+  listSavedCards,
+  setDefaultCard,
+  deleteSavedCard,
 };
