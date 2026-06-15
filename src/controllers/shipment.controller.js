@@ -528,15 +528,8 @@ async function adminListShipments(req, res) {
   const { page, limit, skip } = getPagination(req.query);
   const { status, search, assignedTo, fromDate, toDate } = req.query;
 
-  const statusFilter = (() => {
-    if (!status) return undefined;
-    // Support `?status=A,B,C` or repeated `?status=A&status=B`
-    const values = Array.isArray(status) ? status : String(status).split(',');
-    return values.length > 1 ? { in: values } : values[0];
-  })();
-
   const where = {
-    ...(statusFilter && { status: statusFilter }),
+    ...(status && { status }),
     ...(assignedTo && { assignedToId: assignedTo }),
     ...(fromDate || toDate
       ? {

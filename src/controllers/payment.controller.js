@@ -50,44 +50,6 @@ async function initPayment(req, res) {
   return success(res, result, "Payment initialized");
 }
 
-// ─── Create or fetch a PENDING payment record for invoice generation ──────────
-// Used by "Generate Invoice Only" — creates a Payment row (no Paystack call,
-// no authorization URL) so a proforma invoice can be downloaded/emailed
-// before the customer actually pays. If a payment already exists for this
-// shipment (pending or paid), that record is reused instead of duplicating.
-async function initPendingPayment(req, res) {
-  const { shipmentId } = req.body;
-  const userId = req.user.id;
-
-  const shipment = await prisma.shipment.findFirst({
-    where: { id: shipmentId, customerId: userId },
-  });
-  if (!shipment) throw new ApiError(404, "Shipment not found");
-
-  // Reuse any existing payment record for this shipment (PENDING or PAID)
-  // so we don't create duplicate invoice numbers for the same shipment.
-  let payment = await prisma.payment.findFirst({
-    where: { shipmentId, userId },
-    orderBy: { createdAt: "desc" },
-  });
-
-  if (!payment) {
-    const reference = `BWG-${shipment.trackingNumber}-${Date.now().toString(36).toUpperCase()}`;
-    payment = await prisma.payment.create({
-      data: {
-        reference,
-        userId,
-        shipmentId,
-        amountKobo: Math.round((shipment.quotedPrice || 0) * 100),
-        currency: "NGN",
-        status: "PENDING",
-      },
-    });
-  }
-
-  return success(res, { payment }, "Invoice ready");
-}
-
 // ─── Verify Payment (called by frontend after redirect) ───────────────────────
 async function verifyPaymentHandler(req, res) {
   const { reference } = req.params;
@@ -352,7 +314,6 @@ async function dismissFailedWebhook(req, res) {
 
 module.exports = {
   initPayment,
-  initPendingPayment,
   verifyPaymentHandler,
   webhook,
   paystackCallback,

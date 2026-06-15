@@ -23,15 +23,12 @@ async function authenticate(req, res, next) {
     select: {
       id: true,
       email: true,
-      phone: true,
       firstName: true,
       lastName: true,
       role: true,
       adminSubRole: true,
       isActive: true,
       isEmailVerified: true,
-      twoFactorEnabled: true,
-      twoFactorMethod: true,
     },
   });
 

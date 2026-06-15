@@ -171,21 +171,7 @@ model User {
   isActive         Boolean       @default(true)
   fcmToken         String?
   twoFactorEnabled Boolean @default(false)
-  twoFactorMethod  String? // "EMAIL" | "SMS"
 
-  // ─── Company Info (Settings → Company Info tab) ──────────────────────────
-  companyName      String?
-  industry         String?
-  companyEmail     String?
-  companyPhone     String?
-  companyWebsite   String?
-  companyStreet    String?
-  companyCity      String?
-  companyState     String?
-  companyCountry   String?
-  companyZip       String?
-
-  savedCards          SavedCard[]
   addresses           Address[]
   shipments           Shipment[]           @relation("CustomerShipments")
   managedShipments    Shipment[]           @relation("AssignedShipments")
@@ -594,22 +580,6 @@ model ClaimImage {
 }
 
 // ─── PAYMENTS ─────────────────────────────────────────────────────────────────
-
-model SavedCard {
-  id                String   @id @default(uuid())
-  userId            String
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  authorizationCode String   @unique
-  last4             String?
-  cardType          String?
-  bank              String?
-  expMonth          String?
-  expYear           String?
-  isDefault         Boolean  @default(false)
-  createdAt         DateTime @default(now())
-
-  @@index([userId])
-}
 
 model Payment {
   id                String         @id @default(uuid())
