@@ -125,6 +125,36 @@ router.post('/initialize', paymentController.initPayment);
 
 /**
  * @swagger
+ * /payments/init-pending:
+ *   post:
+ *     summary: Create or reuse a PENDING payment record for invoice generation only
+ *     tags: [Payments]
+ *     description: >
+ *       Creates a Payment row without calling Paystack — no authorization
+ *       URL is returned. Used by "Generate Invoice Only" so a customer can
+ *       download a proforma invoice before paying. If a payment record
+ *       already exists for this shipment, it is reused.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [shipmentId]
+ *             properties:
+ *               shipmentId: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Payment record ready — use payment.id with /invoices/:paymentId/download
+ *       404:
+ *         description: Shipment not found
+ */
+router.post('/init-pending', paymentController.initPendingPayment);
+
+/**
+ * @swagger
  * /payments/verify/{reference}:
  *   get:
  *     summary: Verify a payment by reference

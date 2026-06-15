@@ -237,7 +237,17 @@ async function calculateShippingCost({
     const box = await prisma.boxDimension.findUnique({ where: { id: boxDimensionId } });
     if (box) {
       const volWeight = calcVolumetricWeight(box.lengthCm, box.widthCm, box.heightCm);
-      resolvedWeightKg = Math.max(box.weightKgLimit, volWeight);
+      const perBoxWeight = Math.max(box.weightKgLimit, volWeight);
+
+      // If `cartons` was also provided alongside a box selection, treat it
+      // as the BOX QUANTITY and scale the total weight accordingly.
+      // e.g. a 12kg-limit box × 20 cartons = 240kg total, not 12kg.
+      // Without this, cartons was silently discarded whenever a box was
+      // selected, leaving the total weight at a single box's weight — which
+      // can fall below every price band's minimum and throw
+      // "No pricing available for zone X at Ykg".
+      const boxQuantity = cartons ? Math.max(1, parseInt(cartons, 10)) : 1;
+      resolvedWeightKg = perBoxWeight * boxQuantity;
     }
   }
 
