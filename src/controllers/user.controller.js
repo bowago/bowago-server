@@ -450,4 +450,26 @@ module.exports = {
   listSavedCards,
   setDefaultCard,
   deleteSavedCard,
+  deleteOwnAccount,
 };
+
+// ─── CUSTOMER: DELETE OWN ACCOUNT ──────────────────────────────────────────
+async function deleteOwnAccount(req, res) {
+  const { password } = req.body;
+  if (!password) throw new ApiError(400, 'Password is required to delete your account');
+
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  if (user.passwordHash) {
+    const bcrypt = require('bcryptjs');
+    const valid = await bcrypt.compare(password, user.passwordHash);
+    if (!valid) throw new ApiError(401, 'Incorrect password. Account not deleted.');
+  }
+
+  // Soft-delete via deactivation to preserve shipment/invoice history,
+  // OR hard-delete if you prefer. Hard-delete cascades via Prisma schema.
+  await prisma.user.delete({ where: { id: req.user.id } });
+
+  return success(res, {}, 'Your account has been permanently deleted.');
+}

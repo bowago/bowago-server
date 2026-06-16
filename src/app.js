@@ -1,3 +1,10 @@
+// MUST be the first require — patches Express to forward errors thrown
+// or rejected inside async route handlers to errorHandler (Express 4 does
+// not do this natively). Without this, an unhandled rejection in any
+// `async (req, res) => {...}` handler can bypass our sanitized error
+// handler and surface raw driver/Prisma error text to the client.
+require("express-async-errors");
+
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");

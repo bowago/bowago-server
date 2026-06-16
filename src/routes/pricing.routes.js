@@ -283,7 +283,45 @@ router.post('/dimensions', pricingController.upsertDimension);
  *       403:
  *         description: Admin access required
  */
-router.delete('/dimensions/:id', pricingController.deleteDimension);
+/**
+ * @swagger
+ * /pricing/dimensions/{id}:
+ *   patch:
+ *     summary: Update a box dimension (Super Admin)
+ *     tags: [Pricing]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               categoryId:    { type: string }
+ *               displayName:   { type: string }
+ *               lengthCm:      { type: number }
+ *               widthCm:       { type: number }
+ *               heightCm:      { type: number }
+ *               bestFor:       { type: string }
+ *               weightKgLimit: { type: number }
+ *     responses:
+ *       200:
+ *         description: Box dimension updated
+ *       403:
+ *         description: Super Admin access required
+ *       404:
+ *         description: Box dimension not found
+ *       409:
+ *         description: Category ID already in use
+ */
+router.patch('/dimensions/:id', requireSuperAdmin, pricingController.updateDimension);
+
+router.delete('/dimensions/:id', requireSuperAdmin, pricingController.deleteDimension);
 
 /**
  * @swagger
@@ -466,6 +504,32 @@ router.post('/zone-matrix', pricingController.upsertZoneMatrix);
  *         description: Admin access required
  */
 router.post('/import', authenticate, requireAdmin, uploadImport.single('file'), pricingController.importPricingSheet);
+
+/**
+ * @swagger
+ * /pricing/export:
+ *   get:
+ *     summary: Export current pricing data as an .xlsx file (Super Admin)
+ *     description: >
+ *       Produces an Excel workbook in the same layout the importer expects
+ *       (Dimensions, Zone Matrix, Matrix by KM, Price Bands, Cities),
+ *       populated with the platform's current data. Edit and re-import to
+ *       update pricing/zones/distances/box types.
+ *     tags: [Pricing]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Excel file download
+ *         content:
+ *           application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       403:
+ *         description: Super Admin access required
+ */
+router.get('/export', authenticate, requireSuperAdmin, pricingController.exportPricingSheet);
 
 
 /**

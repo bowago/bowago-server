@@ -55,7 +55,7 @@ function emailShell(content) {
   <div class="footer">
     <p>© ${new Date().getFullYear()} BowaGO Logistics Ltd. All rights reserved.</p>
     <p>You received this email because you have an account on BowaGO.</p>
-    <p><a href="https://bowago.com" style="color:#E85D04;">bowago.com</a> · support@bowago.com</p>
+    <p><a href="${process.env.CLIENT_URL || 'https://bowago.com'}" style="color:#E85D04;">bowago.com</a> · support@bowago.com</p>
   </div>
 </div>
 </body>
@@ -83,7 +83,7 @@ async function sendInvoiceEmail({ to, firstName, invoiceNumber, amount, tracking
       <div class="label">Tracking Number</div>
       <div class="value" style="font-size:16px;">${trackingNumber}</div>
     </div>
-    <p><a href="https://bowago.com/track/${trackingNumber}" class="btn">Track Your Shipment →</a></p>
+    <p><a href="${process.env.CLIENT_URL || "https://bowago.com"}/track/${trackingNumber}" class="btn">Track Your Shipment →</a></p>
     ` : ''}
 
     <p style="color:#888; font-size:13px;">The attached PDF is your official invoice. Please keep it for your records.</p>
@@ -130,7 +130,7 @@ async function sendBookingConfirmationEmail({
     </div>
     ` : ''}
 
-    <p><a href="https://bowago.com/track/${trackingNumber}" class="btn">Track Shipment →</a></p>
+    <p><a href="${process.env.CLIENT_URL || "https://bowago.com"}/track/${trackingNumber}" class="btn">Track Shipment →</a></p>
 
     <p style="color:#888; font-size:13px;">
       Your <strong>booking confirmation</strong> and <strong>shipping label</strong> are attached.
@@ -139,7 +139,7 @@ async function sendBookingConfirmationEmail({
 
     <p style="color:#888; font-size:12px;">
       Need to package your items properly?
-      <a href="https://bowago.com/packaging-guide" style="color:#E85D04;">View our packaging guide →</a>
+      <a href="${process.env.CLIENT_URL || 'https://bowago.com'}/packaging-guide" style="color:#E85D04;">View our packaging guide →</a>
     </p>
   `);
 
@@ -185,7 +185,7 @@ async function sendPaymentSuccessEmail({ to, firstName, amount, trackingNumber, 
       <tr><td>Status</td><td><span class="status-paid">PAID</span></td></tr>
     </table>
 
-    <p><a href="https://bowago.com/track/${trackingNumber}" class="btn">Track Your Shipment →</a></p>
+    <p><a href="${process.env.CLIENT_URL || "https://bowago.com"}/track/${trackingNumber}" class="btn">Track Your Shipment →</a></p>
     <p style="color:#888; font-size:13px;">A full invoice has been sent to your email and is available in your dashboard.</p>
   `);
 

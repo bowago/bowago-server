@@ -3,6 +3,9 @@ const { success } = require('../utils/helpers');
 
 // Dashboard summary stats
 async function getDashboardStats(req, res) {
+  const now = new Date();
+  const startOfYear = new Date(now.getFullYear(), 0, 1);
+
   const [
     totalUsers,
     totalCustomers,
@@ -24,13 +27,53 @@ async function getDashboardStats(req, res) {
     }),
   ]);
 
-  // Recent 30-day trend
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const recentShipments = await prisma.shipment.groupBy({
-    by: ['status'],
-    where: { createdAt: { gte: thirtyDaysAgo } },
+  // Monthly trend (current year, grouped by month)
+  const allShipments = await prisma.shipment.findMany({
+    where: { createdAt: { gte: startOfYear } },
+    select: { createdAt: true },
+  });
+  const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const trendMap = {};
+  MONTH_LABELS.forEach(m => { trendMap[m] = 0; });
+  for (const s of allShipments) {
+    const m = MONTH_LABELS[new Date(s.createdAt).getMonth()];
+    trendMap[m] = (trendMap[m] || 0) + 1;
+  }
+  const trend = MONTH_LABELS.map(month => ({ month, shipments: trendMap[month] }));
+
+  // Top 3 routes (from → to city by shipment count)
+  const routeAgg = await prisma.shipment.groupBy({
+    by: ['senderCity', 'recipientCity'],
+    _count: { _all: true },
+    orderBy: { _count: { id: 'desc' } },
+    take: 5,
+  });
+  const topRoutes = routeAgg
+    .filter(r => r.senderCity && r.recipientCity)
+    .slice(0, 3)
+    .map((r, i) => ({
+      rank: i + 1,
+      from: r.senderCity,
+      to: r.recipientCity,
+      shipments: r._count._all,
+    }));
+
+  // Service type distribution
+  const serviceAgg = await prisma.shipment.groupBy({
+    by: ['serviceType'],
     _count: { _all: true },
   });
+  const totalSvc = serviceAgg.reduce((s, r) => s + r._count._all, 0) || 1;
+  const SERVICE_COLORS = {
+    EXPRESS: '#e8432d',
+    STANDARD: '#3b82f6',
+    ECONOMY: '#10b981',
+  };
+  const serviceDistribution = serviceAgg.map(r => ({
+    name: r.serviceType || 'Other',
+    value: Math.round((r._count._all / totalSvc) * 100),
+    color: SERVICE_COLORS[r.serviceType ?? ''] ?? '#6b7280',
+  }));
 
   return success(res, {
     users: { total: totalUsers, customers: totalCustomers, admins: totalAdmins },
@@ -38,12 +81,14 @@ async function getDashboardStats(req, res) {
       total: totalShipments,
       pending: pendingShipments,
       delivered: deliveredShipments,
-      last30Days: recentShipments,
     },
     revenue: {
       total: totalRevenue._sum.quotedPrice || 0,
       currency: 'NGN',
     },
+    trend,
+    topRoutes,
+    serviceDistribution,
   });
 }
 

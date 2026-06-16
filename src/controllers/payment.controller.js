@@ -142,23 +142,36 @@ async function webhook(req, res) {
 
 // ─── Paystack callback (browser redirect after payment) ───────────────────────
 async function paystackCallback(req, res) {
-  const { reference } = req.query;
-  if (!reference) {
-    return res.redirect(`${process.env.CLIENT_URL}/payment/failed`);
+  // Paystack redirects here after the user completes (or cancels) payment in
+  // their popup. We verify the payment then redirect the user to the frontend
+  // payment callback page with the result embedded in the query string.
+  const { reference, trxref } = req.query;
+  const ref = reference || trxref;
+
+  const frontendCallback =
+    process.env.CLIENT_URL
+      ? `${process.env.CLIENT_URL}/dashboard/payment/callback`
+      : null;
+
+  if (!ref) {
+    const fallback = frontendCallback
+      ? `${frontendCallback}?status=failed&message=No+reference`
+      : "/";
+    return res.redirect(fallback);
   }
 
   try {
-    const result = await verifyPayment(reference);
-    if (result.payment.status === "PAID") {
-      return res.redirect(
-        `${process.env.CLIENT_URL}/payment/success?ref=${reference}`,
-      );
-    }
-    return res.redirect(
-      `${process.env.CLIENT_URL}/payment/failed?ref=${reference}`,
-    );
+    const result = await verifyPayment(ref);
+    const status = result.payment.status === "PAID" ? "success" : "failed";
+    const dest = frontendCallback
+      ? `${frontendCallback}?reference=${ref}&status=${status}`
+      : `/?reference=${ref}&status=${status}`;
+    return res.redirect(dest);
   } catch (err) {
-    return res.redirect(`${process.env.CLIENT_URL}/payment/failed`);
+    const dest = frontendCallback
+      ? `${frontendCallback}?reference=${ref}&status=failed`
+      : "/";
+    return res.redirect(dest);
   }
 }
 

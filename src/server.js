@@ -32,6 +32,22 @@ if (process.env.VERCEL !== "1") {
 
   start();
 
+  // ─── Neon keepalive ping ─────────────────────────────────────────────────
+  // Neon's serverless Postgres closes idle connections after ~5 minutes.
+  // In development with nodemon, the backend stays alive for hours, so we
+  // ping every 4 minutes to keep the pool warm and avoid the cascade of
+  // "Error { kind: Closed }" errors after a quiet period.
+  const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000; // 4 minutes
+  setInterval(async () => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+    } catch (err) {
+      // Reconnect is handled by the $extends middleware in db.js — this is
+      // just a best-effort warmup ping, so we suppress errors here.
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+  // ─────────────────────────────────────────────────────────────────────────
+
   process.on("SIGTERM", async () => {
     await prisma.$disconnect();
     process.exit(0);

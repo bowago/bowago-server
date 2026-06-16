@@ -114,6 +114,11 @@ router.patch("/me", authenticate, userController.updateProfile);
  */
 router.patch("/me/company", authenticate, userController.updateCompanyInfo);
 
+// DELETE /users/me — customer deletes their own account (requires password)
+router.delete("/me", authenticate, userController.deleteOwnAccount);
+
+
+
 /**
  * @swagger
  * /users/me/saved-cards:

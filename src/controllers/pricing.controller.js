@@ -4,6 +4,54 @@ const { calculateShippingCost } = require('../services/pricing.service');
 const { ApiError } = require('../utils/ApiError');
 const { success, created, getPagination, buildMeta } = require('../utils/helpers');
 
+// ─── Bulk-import helper ─────────────────────────────────────────────────────
+// Runs `fn` for each item in `items`, executing up to `concurrency` calls in
+// parallel at a time. Used by importPricingSheet to avoid hundreds/thousands
+// of fully-sequential awaited DB round-trips (which, on a serverless Postgres
+// connection like Neon, can push a single import past the platform's request
+// timeout — e.g. a 39x39 zone matrix is ~1,500 sequential upserts at
+// 50-150ms each = 1-4 minutes just for that one sheet).
+//
+// Each call gets one retry (with a short backoff) if it fails with a
+// connection-init error — Neon's pooled endpoint can transiently refuse new
+// connections under sustained concurrent load from earlier batches.
+function isConnectionError(err) {
+  const name = err?.constructor?.name || err?.name || '';
+  return (
+    name === 'PrismaClientInitializationError' ||
+    err?.message?.includes("Can't reach database server") ||
+    err?.code === 'P1001'
+  );
+}
+
+async function runInBatches(items, concurrency, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const chunk = items.slice(i, i + concurrency);
+    const settled = await Promise.allSettled(
+      chunk.map(async (item) => {
+        try {
+          return await fn(item);
+        } catch (err) {
+          if (!isConnectionError(err)) throw err;
+          // One retry after a short pause — gives the pooler time to free
+          // up a connection slot.
+          await new Promise((r) => setTimeout(r, 400));
+          return fn(item);
+        }
+      }),
+    );
+    results.push(...settled);
+
+    // Small pause between batches so the pooler isn't hit with back-to-back
+    // bursts of `concurrency` new connections for thousands of operations.
+    if (i + concurrency < items.length) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  return results;
+}
+
 // ─── QUOTE ────────────────────────────────────────────────────────────────────
 async function getQuote(req, res) {
   const {
@@ -173,6 +221,35 @@ async function upsertDimension(req, res) {
 async function deleteDimension(req, res) {
   await prisma.boxDimension.delete({ where: { id: req.params.id } });
   return success(res, {}, 'Dimension deleted');
+}
+
+// ─── updateDimension (Super Admin) ─────────────────────────────────────────────
+async function updateDimension(req, res) {
+  const { id } = req.params;
+  const { categoryId, displayName, lengthCm, widthCm, heightCm, bestFor, weightKgLimit } = req.body;
+
+  const existing = await prisma.boxDimension.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, 'Box dimension not found');
+
+  if (categoryId && categoryId !== existing.categoryId) {
+    const dup = await prisma.boxDimension.findUnique({ where: { categoryId } });
+    if (dup) throw new ApiError(409, 'A box with this Category ID already exists');
+  }
+
+  const dimension = await prisma.boxDimension.update({
+    where: { id },
+    data: {
+      ...(categoryId    !== undefined && { categoryId }),
+      ...(displayName   !== undefined && { displayName }),
+      ...(lengthCm      !== undefined && { lengthCm }),
+      ...(widthCm       !== undefined && { widthCm }),
+      ...(heightCm      !== undefined && { heightCm }),
+      ...(bestFor       !== undefined && { bestFor }),
+      ...(weightKgLimit !== undefined && { weightKgLimit }),
+    },
+  });
+
+  return success(res, { dimension }, 'Box dimension updated');
 }
 
 // ─── PRICE BANDS ──────────────────────────────────────────────────────────────
@@ -460,10 +537,107 @@ async function rollbackPriceBand(req, res) {
 }
 
 // ─── EXCEL IMPORT ─────────────────────────────────────────────────────────────
+// ─── EXPORT PRICING SHEET (Super Admin) ─────────────────────────────────────
+// Produces an .xlsx in the same layout the importer expects, populated with
+// the platform's CURRENT data — so a super admin can export, edit in Excel
+// (e.g. fill in real prices), and re-import. Sheets:
+//   - Dimensions       (box types, same CSV-row format as the import sheet)
+//   - Zone Matrix      (city x city grid of zone numbers)
+//   - Matrix by KM     (city x city grid of distances)
+//   - Price Bands      (flat sheet: zone, band, serviceType, pricePerKg, basePrice, isActive)
+async function exportPricingSheet(req, res) {
+  const [cities, dimensions, zoneMatrix, kmMatrix, priceBands] = await Promise.all([
+    prisma.city.findMany({ orderBy: { name: 'asc' } }),
+    prisma.boxDimension.findMany({ orderBy: { categoryId: 'asc' } }),
+    prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.priceBand.findMany({ orderBy: [{ zone: 'asc' }, { serviceType: 'asc' }, { minKg: 'asc' }] }),
+  ]);
+
+  const wb = XLSX.utils.book_new();
+  const cityNames = cities.map((c) => c.name);
+
+  // ── Dimensions sheet ──
+  // Mirrors the import format: a header row, then CSV rows of
+  // "category_id,display_name,length,width,height,best_for,weight_limit"
+  const dimRows = [
+    ['category_id,display_name,length_cm,width_cm,height_cm,best_for,weight_kg_limit'],
+    ...dimensions.map((d) => [
+      `${d.categoryId},${d.displayName},${d.lengthCm},${d.widthCm},${d.heightCm},${d.bestFor ?? ''},${d.weightKgLimit}`,
+    ]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dimRows), 'Dimensions');
+
+  // ── Zone Matrix sheet (city x city grid) ──
+  const zoneLookup = new Map();
+  for (const z of zoneMatrix) {
+    zoneLookup.set(`${z.fromCity.name}|${z.toCity.name}`, z.zone);
+  }
+  const zoneHeader = ['Region', 'From City', ...cityNames];
+  const zoneRows = [zoneHeader];
+  for (const city of cities) {
+    const row = [city.region ?? '', city.name];
+    for (const toName of cityNames) {
+      row.push(zoneLookup.get(`${city.name}|${toName}`) ?? '');
+    }
+    zoneRows.push(row);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(zoneRows), 'Zone Matrix');
+
+  // ── Matrix by KM sheet (city x city grid) ──
+  const kmLookup = new Map();
+  for (const k of kmMatrix) {
+    kmLookup.set(`${k.fromCity.name}|${k.toCity.name}`, k.distanceKm);
+  }
+  const kmHeader = ['From City', ...cityNames];
+  const kmRows = [kmHeader];
+  for (const city of cities) {
+    const row = [city.name];
+    for (const toName of cityNames) {
+      row.push(kmLookup.get(`${city.name}|${toName}`) ?? '');
+    }
+    kmRows.push(row);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(kmRows), 'Matrix by KM');
+
+  // ── Price Bands sheet (flat — current actual pricing) ──
+  const priceHeader = ['Zone', 'Min Kg', 'Max Kg', 'Service Type', 'Price Per Kg (NGN)', 'Base Price (NGN)', 'Active', 'Notes'];
+  const priceRows = [priceHeader];
+  for (const b of priceBands) {
+    priceRows.push([
+      b.zone,
+      b.minKg,
+      b.maxKg ?? 'No limit',
+      b.serviceType,
+      b.pricePerKg,
+      b.basePrice,
+      b.isActive ? 'TRUE' : 'FALSE',
+      b.notes ?? '',
+    ]);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(priceRows), 'Price Bands');
+
+  // ── Cities sheet (reference — region/state per city) ──
+  const cityHeader = ['Name', 'Region', 'State'];
+  const cityRows = [cityHeader, ...cities.map((c) => [c.name, c.region, c.state])];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cityRows), 'Cities');
+
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const filename = `BowaGO-Pricing-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+  res.set({
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': buffer.length,
+  });
+  res.send(buffer);
+}
+
 async function importPricingSheet(req, res) {
   if (!req.file) throw new ApiError(400, 'No file uploaded');
 
   const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+
   const results = { cities: 0, zones: 0, km: 0, priceBands: 0, dimensions: 0, errors: [] };
   const importerId = req.user?.id ?? null;
 
@@ -556,8 +730,9 @@ async function importPricingSheet(req, res) {
     const allCityNames = new Set([...cityColumns]);
     for (let i = 1; i < sheet.length; i++) { if (sheet[i][1]) allCityNames.add(sheet[i][1]); }
 
-    for (const cityName of allCityNames) {
-      if (!cityName || typeof cityName !== 'string') continue;
+    // Upsert all cities concurrently (bounded), ~39 calls instead of fully sequential
+    const cityNameList = [...allCityNames].filter((n) => n && typeof n === 'string');
+    const cityResults = await runInBatches(cityNameList, 8, async (cityName) => {
       const meta = cityRegionMap[cityName.trim()] ?? { region: 'Unknown', state: 'Unknown' };
       const city = await prisma.city.upsert({
         where: { name: cityName.trim() },
@@ -565,10 +740,22 @@ async function importPricingSheet(req, res) {
         update: { region: meta.region, state: meta.state },
         create: { name: cityName.trim(), region: meta.region, state: meta.state },
       });
-      cityMap[cityName.trim()] = city.id;
-      results.cities++;
+      return { cityName: cityName.trim(), id: city.id };
+    });
+    for (const r of cityResults) {
+      if (r.status === 'fulfilled') {
+        cityMap[r.value.cityName] = r.value.id;
+        results.cities++;
+      } else {
+        results.errors.push(`City upsert: ${r.reason?.message}`);
+      }
     }
 
+    // Build the flat list of (fromCity, toCity, zone) entries first, then
+    // upsert them all concurrently (bounded) — a 39x39 matrix is ~1,500
+    // entries, so this turns ~1,500 sequential round-trips into ~75 batches
+    // of 20 concurrent calls.
+    const zoneEntries = [];
     for (let i = 1; i < sheet.length; i++) {
       const row = sheet[i];
       const fromCityName = row[1];
@@ -580,16 +767,25 @@ async function importPricingSheet(req, res) {
         const fromId = cityMap[fromCityName?.trim()];
         const toId   = cityMap[toCityName?.trim()];
         if (!fromId || !toId) continue;
-        try {
-          await prisma.zoneMatrix.upsert({
-            where: { fromCityId_toCityId: { fromCityId: fromId, toCityId: toId } },
-            update: { zone: parseInt(zone) },
-            create: { fromCityId: fromId, toCityId: toId, zone: parseInt(zone) },
-          });
-          results.zones++;
-        } catch (e) { results.errors.push(`Zone ${fromCityName}->${toCityName}: ${e.message}`); }
+        zoneEntries.push({ fromCityName, toCityName, fromId, toId, zone: parseInt(zone) });
       }
     }
+
+    const zoneResults = await runInBatches(zoneEntries, 8, (entry) =>
+      prisma.zoneMatrix.upsert({
+        where: { fromCityId_toCityId: { fromCityId: entry.fromId, toCityId: entry.toId } },
+        update: { zone: entry.zone },
+        create: { fromCityId: entry.fromId, toCityId: entry.toId, zone: entry.zone },
+      }),
+    );
+    zoneResults.forEach((r, idx) => {
+      if (r.status === 'fulfilled') {
+        results.zones++;
+      } else {
+        const entry = zoneEntries[idx];
+        results.errors.push(`Zone ${entry.fromCityName}->${entry.toCityName}: ${r.reason?.message}`);
+      }
+    });
   }
 
   // KM Matrix sheet
@@ -599,40 +795,61 @@ async function importPricingSheet(req, res) {
     const toCityNames = headers.slice(1);
     const cityMap = {};
 
+    // Collect every distinct city name referenced in this sheet, then
+    // resolve them all in ONE query instead of one findFirst per name
+    // (previously up to ~78 sequential lookups for a 39-city matrix).
+    const allNames = new Set();
     for (let i = 1; i < sheet.length; i++) {
-      if (sheet[i][0]) {
-        const city = await prisma.city.findFirst({ where: { name: { equals: sheet[i][0].trim(), mode: 'insensitive' } } });
-        if (city) cityMap[sheet[i][0].trim()] = city.id;
-      }
+      if (sheet[i][0]) allNames.add(String(sheet[i][0]).trim());
     }
     for (const name of toCityNames) {
-      if (!name) continue;
-      const city = await prisma.city.findFirst({ where: { name: { equals: name.trim(), mode: 'insensitive' } } });
-      if (city) cityMap[name.trim()] = city.id;
+      if (name) allNames.add(String(name).trim());
     }
 
+    const matchedCities = await prisma.city.findMany({
+      where: { name: { in: [...allNames], mode: 'insensitive' } },
+      select: { id: true, name: true },
+    });
+    const byLowerName = new Map(matchedCities.map((c) => [c.name.toLowerCase(), c]));
+    for (const name of allNames) {
+      const match = byLowerName.get(name.toLowerCase());
+      if (match) cityMap[name] = match.id;
+    }
+
+    // Build the flat list of (fromCity, toCity, distanceKm) entries, then
+    // upsert concurrently in bounded batches (was ~1,500 sequential calls).
+    const kmEntries = [];
     for (let i = 1; i < sheet.length; i++) {
       const row = sheet[i];
       const fromCityName = row[0];
       if (!fromCityName) continue;
-      const fromId = cityMap[fromCityName.trim()];
+      const fromId = cityMap[String(fromCityName).trim()];
       if (!fromId) continue;
       for (let j = 0; j < toCityNames.length; j++) {
         const toCityName = toCityNames[j];
         const dist = row[j + 1];
         if (!dist && dist !== 0) continue;
-        const toId = cityMap[toCityName?.trim()];
+        const toId = cityMap[toCityName ? String(toCityName).trim() : ''];
         if (!toId) continue;
-        try {
-          await prisma.kmMatrix.upsert({
-            where: { fromCityId_toCityId: { fromCityId: fromId, toCityId: toId } },
-            update: { distanceKm: parseFloat(dist) },
-            create: { fromCityId: fromId, toCityId: toId, distanceKm: parseFloat(dist) },
-          });
-          results.km++;
-        } catch (e) { results.errors.push(`KM ${fromCityName}->${toCityName}: ${e.message}`); }
+        kmEntries.push({ fromCityName, toCityName, fromId, toId, distanceKm: parseFloat(dist) });
       }
     }
+
+    const kmResults = await runInBatches(kmEntries, 8, (entry) =>
+      prisma.kmMatrix.upsert({
+        where: { fromCityId_toCityId: { fromCityId: entry.fromId, toCityId: entry.toId } },
+        update: { distanceKm: entry.distanceKm },
+        create: { fromCityId: entry.fromId, toCityId: entry.toId, distanceKm: entry.distanceKm },
+      }),
+    );
+    kmResults.forEach((r, idx) => {
+      if (r.status === 'fulfilled') {
+        results.km++;
+      } else {
+        const entry = kmEntries[idx];
+        results.errors.push(`KM ${entry.fromCityName}->${entry.toCityName}: ${r.reason?.message}`);
+      }
+    });
   }
 
   // ─── Price sheet → priceBand records ─────────────────────────────────────
@@ -653,6 +870,17 @@ async function importPricingSheet(req, res) {
 
     if (dataStart > 0) {
       let currentZone = null;
+      // Track the lowest minKg seen per zone so we can backfill a
+      // "0 to (lowest minKg - 1)" band afterward — the source sheet's
+      // ranges start at 50kg, leaving every shipment under 50kg with
+      // no matching band ("No pricing available for zone X at Ykg").
+      const lowestMinKgByZone = {};
+
+      // Collect all (zone, minKg, maxKg) combos parsed from the sheet first,
+      // so we can do ONE findMany to check what already exists instead of
+      // a findFirst per (zone, serviceType, band) — was up to ~144 sequential
+      // round-trips for a 4-zone/6-band sheet.
+      const parsedBands = [];
 
       for (let i = dataStart; i < sheet.length; i++) {
         const row = sheet[i];
@@ -683,48 +911,143 @@ async function importPricingSheet(req, res) {
           continue;
         }
 
-        // Create a price band for each service type (EXPRESS, STANDARD, ECONOMY)
-        // The Excel doesn't differentiate by service type, so we create one per type
-        // using a placeholder pricePerKg; admins can update individual bands after import.
-        // We do NOT overwrite if a specific pricePerKg already exists (only create missing bands).
-        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
-          try {
-            const existing = await prisma.priceBand.findFirst({
-              where: { zone: currentZone, serviceType, minKg, maxKg },
-            });
+        if (lowestMinKgByZone[currentZone] === undefined || minKg < lowestMinKgByZone[currentZone]) {
+          lowestMinKgByZone[currentZone] = minKg;
+        }
 
-            if (!existing) {
-              await prisma.priceBand.create({
-                data: {
-                  zone: currentZone,
-                  serviceType,
-                  minKg,
-                  maxKg,
-                  // Placeholder — 0 so admin can see the band exists and set real prices
-                  pricePerKg: 0,
-                  basePrice: 0,
-                  isActive: true,
-                  ...(importerId ? { createdBy: importerId } : {}),
-                },
-              });
-              results.priceBands++;
-            }
-          } catch (e) {
-            results.errors.push(`PriceBand zone${currentZone} ${serviceType} ${kgStr}: ${e.message}`);
-          }
+        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
+          parsedBands.push({ zone: currentZone, serviceType, minKg, maxKg, kgStr });
         }
       }
+
+      // Gap-fill 0-(lowestMinKg-1) bands for each zone/service
+      for (const [zoneStr, lowestMinKg] of Object.entries(lowestMinKgByZone)) {
+        const zone = parseInt(zoneStr);
+        if (lowestMinKg <= 0) continue;
+        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
+          parsedBands.push({
+            zone, serviceType, minKg: 0, maxKg: lowestMinKg - 1,
+            kgStr: `0-${lowestMinKg - 1} (gap-fill)`,
+            isGapFill: true,
+          });
+        }
+      }
+
+      // One query to find every existing band that matches any of the
+      // (zone, serviceType, minKg, maxKg) combos we're about to consider.
+      const zonesInvolved = [...new Set(parsedBands.map((b) => b.zone))];
+      const existingBands = await prisma.priceBand.findMany({
+        where: { zone: { in: zonesInvolved } },
+        select: { zone: true, serviceType: true, minKg: true, maxKg: true },
+      });
+      const existingKey = (b) => `${b.zone}|${b.serviceType}|${b.minKg}|${b.maxKg ?? 'null'}`;
+      const existingSet = new Set(existingBands.map(existingKey));
+
+      const toCreate = parsedBands.filter((b) => !existingSet.has(existingKey(b)));
+      // Also de-dupe within the batch itself (e.g. gap-fill band already
+      // present as a regular parsed band for the same key)
+      const seen = new Set();
+      const toCreateUnique = toCreate.filter((b) => {
+        const key = existingKey(b);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      const createResults = await runInBatches(toCreateUnique, 8, (b) =>
+        prisma.priceBand.create({
+          data: {
+            zone: b.zone,
+            serviceType: b.serviceType,
+            minKg: b.minKg,
+            maxKg: b.maxKg,
+            // Placeholder — 0 so admin can see the band exists and set real prices
+            pricePerKg: 0,
+            basePrice: 0,
+            isActive: true,
+            ...(b.isGapFill && {
+              notes: 'Auto-generated gap-fill band — set real pricing for shipments under the imported sheet\'s minimum weight.',
+            }),
+            ...(importerId ? { createdBy: importerId } : {}),
+          },
+        }),
+      );
+      createResults.forEach((r, idx) => {
+        if (r.status === 'fulfilled') {
+          results.priceBands++;
+        } else {
+          const b = toCreateUnique[idx];
+          results.errors.push(`PriceBand zone${b.zone} ${b.serviceType} ${b.kgStr}: ${r.reason?.message}`);
+        }
+      });
     }
   }
 
   return success(res, { results }, 'Import completed');
 }
 
+// ─── Backfill 0–(min-1)kg price bands for all zones ────────────────────────
+// One-off fix for installs that already imported a pricing sheet whose
+// ranges all started at 50kg, leaving every sub-50kg shipment with
+// "No pricing available for zone X at Ykg". Finds the lowest minKg per
+// (zone, serviceType) and creates a 0-to-(lowest-1) placeholder band if
+// missing.
+async function backfillLowWeightBands(req, res) {
+  const bands = await prisma.priceBand.findMany({
+    where: { zone: { not: null } },
+    select: { zone: true, serviceType: true, minKg: true },
+  });
+
+  const lowestByZoneService = {};
+  for (const b of bands) {
+    const key = `${b.zone}:${b.serviceType}`;
+    if (lowestByZoneService[key] === undefined || b.minKg < lowestByZoneService[key]) {
+      lowestByZoneService[key] = b.minKg;
+    }
+  }
+
+  let created = 0;
+  const errors = [];
+
+  for (const [key, lowestMinKg] of Object.entries(lowestByZoneService)) {
+    if (lowestMinKg <= 0) continue;
+    const [zoneStr, serviceType] = key.split(':');
+    const zone = parseInt(zoneStr);
+
+    try {
+      const existing = await prisma.priceBand.findFirst({
+        where: { zone, serviceType, minKg: 0, maxKg: lowestMinKg - 1 },
+      });
+
+      if (!existing) {
+        await prisma.priceBand.create({
+          data: {
+            zone,
+            serviceType,
+            minKg: 0,
+            maxKg: lowestMinKg - 1,
+            pricePerKg: 0,
+            basePrice: 0,
+            isActive: true,
+            notes: 'Auto-generated gap-fill band — set real pricing for shipments under the imported sheet\'s minimum weight.',
+            ...(req.user?.id ? { createdBy: req.user.id } : {}),
+          },
+        });
+        created++;
+      }
+    } catch (e) {
+      errors.push(`zone${zone} ${serviceType}: ${e.message}`);
+    }
+  }
+
+  return success(res, { created, errors }, `Created ${created} gap-fill price band(s)`);
+}
+
 module.exports = {
   getQuote, listCities, upsertCity, updateCity, deleteCity,
-  listDimensions, upsertDimension, deleteDimension,
+  listDimensions, upsertDimension, updateDimension, deleteDimension,
   listPriceBands, createPriceBand, updatePriceBand, deletePriceBand,
   getZoneMatrix, upsertZoneMatrix, updateZoneMatrix, pauseZoneMatrix, reinstateZoneMatrix, deleteZoneMatrix,
   getPricingStats,
-  rollbackPriceBand, importPricingSheet,
+  rollbackPriceBand, importPricingSheet, exportPricingSheet, backfillLowWeightBands,
 };

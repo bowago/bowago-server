@@ -70,7 +70,7 @@ async function initializePayment({
       ...metadata,
       cancel_action: process.env.CLIENT_URL + "/payment/cancelled",
     },
-    callback_url: `${process.env.API_URL || "https://bowago-backend.vercel.app"}/api/v1/payments/callback`,
+    callback_url: `${process.env.API_URL || process.env.BACKEND_URL || "https://bowago-backend.vercel.app"}/api/v1/payments/callback`,
   });
 
   if (!response.status)
