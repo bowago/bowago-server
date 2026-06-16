@@ -1,29 +1,34 @@
-const nodemailer = require('nodemailer');
+const nodemailer = require("nodemailer");
 
+/// Email configuration and utility functions
+
+// We use SMTP for sending emails. The configuration is read from environment
+// variables. For development, you can use a service like Mailtrap or Ethereal
+// to capture test emails without sending real ones.
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_PORT === '465',
+  secure: process.env.SMTP_PORT === "465",
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
 });
 
-const FROM = process.env.EMAIL_FROM || 'BowaGO <noreply@bowago.com>';
+const FROM = process.env.EMAIL_FROM || "BowaGO <noreply@bowago.com>";
 
 async function sendEmail({ to, subject, html, text }) {
   return transporter.sendMail({ from: FROM, to, subject, html, text });
 }
 
-async function sendOtpEmail(email, otp, type = 'verify') {
+async function sendOtpEmail(email, otp, type = "verify") {
   const subjects = {
-    EMAIL_VERIFY: 'Verify your BowaGO account',
-    PASSWORD_RESET: 'Reset your BowaGO password',
-    LOGIN: 'Your BowaGO login code',
+    EMAIL_VERIFY: "Verify your BowaGO account",
+    PASSWORD_RESET: "Reset your BowaGO password",
+    LOGIN: "Your BowaGO login code",
   };
 
-  const subject = subjects[type] || 'Your BowaGO verification code';
+  const subject = subjects[type] || "Your BowaGO verification code";
 
   return sendEmail({
     to: email,
@@ -50,12 +55,12 @@ async function sendOtpEmail(email, otp, type = 'verify') {
 
 async function sendShipmentStatusEmail(email, firstName, shipment) {
   const statusLabels = {
-    CONFIRMED: 'Confirmed & Processing',
-    PICKED_UP: 'Picked Up',
-    IN_TRANSIT: 'In Transit',
-    OUT_FOR_DELIVERY: 'Out for Delivery',
-    DELIVERED: 'Delivered',
-    CANCELLED: 'Cancelled',
+    CONFIRMED: "Confirmed & Processing",
+    PICKED_UP: "Picked Up",
+    IN_TRANSIT: "In Transit",
+    OUT_FOR_DELIVERY: "Out for Delivery",
+    DELIVERED: "Delivered",
+    CANCELLED: "Cancelled",
   };
 
   const label = statusLabels[shipment.status] || shipment.status;
