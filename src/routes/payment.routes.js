@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const paymentController = require('../controllers/payment.controller');
-const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSuperAdmin, requireAdmin } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -369,6 +369,43 @@ router.get('/stats', requireLogisticsOrAbove, paymentController.paymentStats);
  *       200:
  *         description: List of failed webhook events
  */
+
+/**
+ * @swagger
+ * /payments/{shipmentId}/mark-paid:
+ *   post:
+ *     summary: Manually mark a shipment as paid (Admin — for cash/bank transfer)
+ *     tags: [Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shipmentId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               method: { type: string, enum: [cash, bank_transfer, pos, cheque], default: cash }
+ *               reference: { type: string, description: Bank reference or receipt number }
+ *               notes: { type: string }
+ */
+router.post('/:shipmentId/mark-paid', requireLogisticsOrAbove, paymentController.markAsPaid);
+
+/**
+ * @swagger
+ * /payments/{shipmentId}/waive:
+ *   post:
+ *     summary: Waive payment for a shipment (Super Admin only)
+ *     tags: [Payments]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post('/:shipmentId/waive', requireSuperAdmin, paymentController.waivePayment);
+
 router.get('/webhooks/failed', requireSuperAdmin, paymentController.listFailedWebhooks);
 
 /**

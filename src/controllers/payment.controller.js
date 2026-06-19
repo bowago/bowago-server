@@ -18,10 +18,11 @@ async function initPayment(req, res) {
   const userId = req.user.id;
   const email = req.user.email;
 
+  // Only customers can initiate Paystack payment — admins use markAsPaid instead.
   const shipment = await prisma.shipment.findFirst({
     where: { id: shipmentId, customerId: userId },
   });
-  if (!shipment) throw new ApiError(404, "Shipment not found");
+  if (!shipment) throw new ApiError(404, 'Shipment not found');
   if (shipment.paymentStatus === "PAID")
     throw new ApiError(400, "Shipment is already paid");
 
@@ -363,8 +364,107 @@ async function dismissFailedWebhook(req, res) {
   return success(res, {}, "Webhook entry dismissed");
 }
 
+// ─── MARK SHIPMENT AS PAID (Admin/Super Admin only) ──────────────────────────
+// Used when a customer pays offline (cash, bank transfer, etc.) and an admin
+// needs to record the payment manually without going through Paystack.
+async function markAsPaid(req, res) {
+  const { shipmentId } = req.params;
+  const { method = 'MANUAL', reference, notes } = req.body;
+  const adminId = req.user.id;
+
+  const shipment = await prisma.shipment.findFirst({
+    where: { id: shipmentId },
+    include: { customer: { select: { id: true, email: true, firstName: true, lastName: true } } },
+  });
+  if (!shipment) throw new ApiError(404, 'Shipment not found');
+  if (shipment.paymentStatus === 'PAID') {
+    throw new ApiError(400, 'This shipment is already marked as paid');
+  }
+
+  const manualRef = reference || `MANUAL-${Date.now().toString(36).toUpperCase()}`;
+
+  // Create or update the payment record
+  const existing = await prisma.payment.findFirst({
+    where: { shipmentId, userId: shipment.customerId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  let payment;
+  if (existing) {
+    payment = await prisma.payment.update({
+      where: { id: existing.id },
+      data: {
+        status: 'PAID',
+        channel: 'manual',
+        paidAt: new Date(),
+        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || 'N/A'}`,
+        ...(reference ? { reference: manualRef } : {}),
+      },
+    });
+  } else {
+    payment = await prisma.payment.create({
+      data: {
+        reference: manualRef,
+        userId: shipment.customerId,
+        shipmentId,
+        amountKobo: Math.round((shipment.quotedPrice || 0) * 100),
+        currency: 'NGN',
+        status: 'PAID',
+        channel: 'manual',
+        paidAt: new Date(),
+        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || 'N/A'}`,
+      },
+    });
+  }
+
+  // Update shipment payment status
+  await prisma.shipment.update({
+    where: { id: shipmentId },
+    data: { paymentStatus: 'PAID' },
+  });
+
+  return success(res, { payment }, 'Shipment marked as paid successfully');
+}
+
+// ─── WAIVE PAYMENT (Super Admin only) ─────────────────────────────────────────
+// Comps a shipment — marks it paid at ₦0 with reason noted.
+async function waivePayment(req, res) {
+  const { shipmentId } = req.params;
+  const { reason = 'Waived by admin' } = req.body;
+
+  const shipment = await prisma.shipment.findFirst({ where: { id: shipmentId } });
+  if (!shipment) throw new ApiError(404, 'Shipment not found');
+  if (shipment.paymentStatus === 'PAID') {
+    throw new ApiError(400, 'Shipment is already paid');
+  }
+
+  const payment = await prisma.payment.create({
+    data: {
+      reference: `WAIVED-${Date.now().toString(36).toUpperCase()}`,
+      userId: shipment.customerId,
+      shipmentId,
+      amountKobo: 0,
+      currency: 'NGN',
+      status: 'PAID',
+      channel: 'waived',
+      paidAt: new Date(),
+      gatewayResponse: `Payment waived. Reason: ${reason}`,
+    },
+  });
+
+  await prisma.shipment.update({
+    where: { id: shipmentId },
+    data: { paymentStatus: 'PAID', finalPrice: 0 },
+  });
+
+  return success(res, { payment }, 'Payment waived successfully');
+}
+
+
 module.exports = {
   initPayment,
+  markAsPaid,
+  waivePayment,
   initPendingPayment,
   verifyPaymentHandler,
   webhook,

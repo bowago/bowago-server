@@ -1,3 +1,4 @@
+const path = require('path');
 const PDFDocument = require('pdfkit');
 const { Readable } = require('stream');
 
@@ -31,21 +32,46 @@ function drawRule(doc, y, color = BRAND.border) {
   doc.strokeColor(color).lineWidth(0.5).moveTo(50, y).lineTo(545, y).stroke();
 }
 
+
+// Path to the logo PNG bundled with the backend in assets/logo.png
+// The SVG from the frontend was converted to PNG (PDFKit does not support SVG).
+const LOGO_PATH = path.join(__dirname, '../../assets/logo.png');
+const fs = require('fs');
+const LOGO_BUFFER = (() => {
+  try {
+    return fs.readFileSync(LOGO_PATH);
+  } catch {
+    return null; // gracefully degrade to text logo if file is missing
+  }
+})();
+
+function _textLogo(doc) {
+  doc.rect(50, 20, 130, 45).fill(BRAND.orange);
+  doc.fillColor(BRAND.white).font('Helvetica-Bold').fontSize(16).text('Bowagate', 55, 30);
+  doc.fillColor(BRAND.white).font('Helvetica').fontSize(10).text('Global LTD', 55, 50);
+}
+
 // ─── Helper: draw header band ─────────────────────────────────────────────────
 function drawHeader(doc, title) {
   // Orange top bar
   doc.rect(0, 0, 595, 8).fill(BRAND.orange);
 
-  // Logo area
-  doc.rect(50, 25, 120, 40).fill(BRAND.orange);
-  doc.fillColor(BRAND.white).font('Helvetica-Bold').fontSize(22).text('BOWA', 55, 33);
-  doc.fillColor(BRAND.white).font('Helvetica').fontSize(11).text('GO', 100, 37);
+  // Logo — loaded from assets/logo.png at startup, falls back to text
+  if (LOGO_BUFFER) {
+    try {
+      doc.image(LOGO_BUFFER, 45, 15, { width: 120, height: 54 });
+    } catch {
+      _textLogo(doc);
+    }
+  } else {
+    _textLogo(doc);
+  }
 
   // Company info
   doc.fillColor(BRAND.gray).font('Helvetica').fontSize(8)
-    .text('BowaGO Logistics Ltd', 200, 28)
-    .text('support@bowago.com', 200, 40)
-    .text('www.bowago.com', 200, 52);
+    .text('Bowagate Global LTD', 200, 28)
+    .text('support@bowagate.com', 200, 40)
+    .text('www.bowagate.com', 200, 52);
 
   // Document title
   doc.fillColor(BRAND.dark).font('Helvetica-Bold').fontSize(20)
@@ -61,7 +87,7 @@ function drawFooter(doc) {
   drawRule(doc, bottom - 15, BRAND.border);
   doc.fillColor(BRAND.gray).font('Helvetica').fontSize(7)
     .text(
-      'BowaGO Logistics Ltd  |  This document was generated automatically  |  support@bowago.com  |  www.bowago.com',
+      'Bowagate Global LTD  |  This document was generated automatically  |  support@bowagate.com  |  www.bowagate.com',
       50, bottom,
       { align: 'center', width: 495 }
     );
@@ -253,7 +279,7 @@ async function generateShippingLabelPDF(shipment) {
 
     // Logo
     doc.rect(15, 12, 70, 24).fill(BRAND.orange);
-    doc.fillColor(BRAND.white).font('Helvetica-Bold').fontSize(14).text('BowaGO', 18, 17);
+    doc.fillColor(BRAND.white).font('Helvetica-Bold').fontSize(14).text('Bowagate', 18, 17);
 
     // Service type badge
     const serviceColor = shipment.serviceType === 'EXPRESS' ? BRAND.red :
@@ -324,7 +350,7 @@ async function generateShippingLabelPDF(shipment) {
     // Footer
     doc.rect(0, 420, 288, 6).fill(BRAND.orange);
     doc.fillColor(BRAND.gray).font('Helvetica').fontSize(6)
-      .text('bowago.com  |  support@bowago.com', 0, 408, { align: 'center', width: 288 });
+      .text('bowago.com  |  support@bowagate.com', 0, 408, { align: 'center', width: 288 });
 
     doc.end();
   });
@@ -357,7 +383,7 @@ async function generateBookingConfirmationPDF(data) {
     doc.fillColor(BRAND.orange).font('Helvetica-Bold').fontSize(22)
       .text(shipment.trackingNumber, 60, doc.y + 22);
     doc.fillColor(BRAND.white).font('Helvetica').fontSize(9)
-      .text(`Track at: bowago.com/track/${shipment.trackingNumber}`, 300, doc.y + 28);
+      .text(`Track at: ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace('https://', '').replace('http://','') : 'bowagate.com'}/track/${shipment.trackingNumber}`, 300, doc.y + 28);
     doc.y += 65;
 
     // Cut-off warning
@@ -421,7 +447,7 @@ async function generateBookingConfirmationPDF(data) {
     doc.fillColor(BRAND.orange).font('Helvetica-Bold').fontSize(9).text('NEXT STEPS', 60, doc.y + 10);
     doc.fillColor(BRAND.dark).font('Helvetica').fontSize(9)
       .text('1.  Complete payment to confirm your booking.', 60, doc.y + 24)
-      .text('2.  Package your items securely. Visit bowago.com/packaging-guide for tips.', 60, doc.y + 38)
+      .text(`2.  Package your items securely. Visit ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace(/^https?:\/\//, '') : 'bowagate.com'}/packaging-guide for tips.`, 60, doc.y + 38)
       .text('3.  Have your package ready at the pickup address on the scheduled date.', 60, doc.y + 52);
 
     drawFooter(doc);
