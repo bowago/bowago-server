@@ -68,9 +68,9 @@ async function initializePayment({
       userId,
       shipmentId,
       ...metadata,
-      cancel_action: `${process.env.CLIENT_URL || ''}/payment/cancelled`,
+      cancel_action: `${process.env.CLIENT_URL || ""}/payment/cancelled`,
     },
-    callback_url: `${process.env.API_URL || process.env.BACKEND_URL || ''}/api/v1/payments/callback`,
+    callback_url: `${process.env.API_URL || ""}/api/v1/payments/callback`,
   });
 
   if (!response.status)
@@ -129,7 +129,9 @@ async function verifyPayment(reference) {
   // reusable — this powers the Payment Method tab in Settings.
   const auth = tx.authorization;
   if (isPaid && auth?.reusable && auth?.authorization_code) {
-    const existingCount = await prisma.savedCard.count({ where: { userId: payment.userId } });
+    const existingCount = await prisma.savedCard.count({
+      where: { userId: payment.userId },
+    });
     await prisma.savedCard.upsert({
       where: { authorizationCode: auth.authorization_code },
       update: {
