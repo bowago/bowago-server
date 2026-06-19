@@ -40,7 +40,10 @@ const app = express();
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
 
-const rawOrigins = (process.env.CLIENT_URL || "")
+// CORS_ORIGINS — comma-separated list of allowed frontend origins.
+// CLIENT_URL  — single primary frontend URL used for redirects (Paystack callback etc).
+// If CORS_ORIGINS is not set, falls back to CLIENT_URL for backward compatibility.
+const rawOrigins = (process.env.CORS_ORIGINS || process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -48,6 +51,7 @@ const rawOrigins = (process.env.CLIENT_URL || "")
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
+  "https://www.bowagate-frontend.vercel.app",
   ...rawOrigins,
 ];
 

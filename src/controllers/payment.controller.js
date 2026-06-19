@@ -149,10 +149,12 @@ async function paystackCallback(req, res) {
   const { reference, trxref } = req.query;
   const ref = reference || trxref;
 
-  const frontendCallback =
-    process.env.CLIENT_URL
-      ? `${process.env.CLIENT_URL}/dashboard/payment/callback`
-      : null;
+  // Use only the PRIMARY frontend URL for redirects — CLIENT_URL must be a
+  // single URL. Multiple origins for CORS go in CORS_ORIGINS env var.
+  const primaryClient = (process.env.CLIENT_URL || "").split(",")[0].trim();
+  const frontendCallback = primaryClient
+    ? `${primaryClient}/dashboard/payment/callback`
+    : null;
 
   if (!ref) {
     const fallback = frontendCallback
@@ -169,8 +171,11 @@ async function paystackCallback(req, res) {
       : `/?reference=${ref}&status=${status}`;
     return res.redirect(dest);
   } catch (err) {
+    // Log the real reason so it appears in Vercel function logs
+    console.error(`[paystackCallback] verifyPayment failed for ref=${ref}:`, err.message);
+    // Still send the reference so the frontend can retry verification itself
     const dest = frontendCallback
-      ? `${frontendCallback}?reference=${ref}&status=failed`
+      ? `${frontendCallback}?reference=${ref}&status=failed&reason=${encodeURIComponent(err.message || "unknown")}`
       : "/";
     return res.redirect(dest);
   }
