@@ -115,7 +115,7 @@ async function verifyPayment(reference) {
     where: { reference },
     data: {
       status: isPaid ? "PAID" : "FAILED",
-      paystackId: tx.id,
+      paystackId: tx.id ? String(tx.id) : null,
       gatewayResponse: tx.gateway_response,
       paidAt: isPaid ? new Date(tx.paid_at) : null,
       channel: mapChannel(tx.channel),

@@ -622,7 +622,7 @@ model Payment {
   channel           PaymentChannel?
   status            PaymentStatus  @default(PENDING)
 
-  paystackId        Int?
+  paystackId        String?   // Paystack tx ID stored as String (too large for Int32)
   gatewayResponse   String?
   paidAt            DateTime?
   authorizationCode String?

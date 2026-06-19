@@ -591,7 +591,7 @@ All monetary values are stored in **Kobo** internally. API responses include com
               enum: ["CARD", "BANK_TRANSFER", "USSD", "MOBILE_MONEY", "QR"],
               nullable: true,
             },
-            paystackId: { type: "integer", nullable: true },
+            paystackId: { type: "string", nullable: true },
             gatewayResponse: {
               type: "string",
               example: "Approved",
