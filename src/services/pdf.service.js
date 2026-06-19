@@ -17,7 +17,11 @@ const BRAND = {
 
 // ─── Helper: format currency ──────────────────────────────────────────────────
 function formatNaira(amount) {
-  return `₦${Number(amount || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
+  // PDFKit uses Helvetica by default which does not include the ₦ (Naira)
+  // Unicode character — it renders as a broken glyph. We use "NGN " prefix
+  // instead, which Helvetica renders correctly.
+  const formatted = Number(amount || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 });
+  return `NGN ${formatted}`;
 }
 
 // ─── Helper: format date ──────────────────────────────────────────────────────
