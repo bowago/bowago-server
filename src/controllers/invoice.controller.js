@@ -338,6 +338,33 @@ async function financialOverview(req, res) {
   });
 }
 
+// ─── Customer Invoice Summary ────────────────────────────────────────────────
+// Returns payment stats scoped to the authenticated customer only.
+async function myInvoiceSummary(req, res) {
+  const userId = req.user.id;
+
+  const [paid, pending, refunded, totalSpent] = await Promise.all([
+    prisma.payment.count({ where: { userId, status: 'PAID' } }),
+    prisma.payment.count({ where: { userId, status: 'PENDING' } }),
+    prisma.payment.count({ where: { userId, status: 'REFUNDED' } }),
+    prisma.payment.aggregate({
+      where: { userId, status: 'PAID' },
+      _sum: { amountKobo: true },
+    }),
+  ]);
+
+  return success(res, {
+    summary: {
+      totalSpentNaira: (totalSpent._sum.amountKobo || 0) / 100,
+      paidInvoices: paid,
+      pendingInvoices: pending,
+      refundedCount: refunded,
+      currency: 'NGN',
+    },
+  });
+}
+
+
 module.exports = {
   myInvoices,
   adminListInvoices,
@@ -347,6 +374,7 @@ module.exports = {
   downloadShippingLabel,
   downloadBookingConfirmation,
   financialOverview,
+  myInvoiceSummary,
 };
 
 // ─── GET /invoices/admin — Admin list of all invoices ─────────────────────────

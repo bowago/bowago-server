@@ -116,6 +116,9 @@ router.get('/my', invoiceController.myInvoices);
  *       403:
  *         description: Admin access required
  */
+
+router.get('/my-summary', authenticate, invoiceController.myInvoiceSummary);
+
 router.get('/financial-overview', requireLogisticsOrAbove, invoiceController.financialOverview);
 
 
