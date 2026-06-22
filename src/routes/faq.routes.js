@@ -1,6 +1,7 @@
 // ─── faq.routes.js ───────────────────────────────────────────────────────────
 const faqRouter = require('express').Router();
 const faqController = require('../controllers/faq.controller');
+const { requireSuperAdmin } = require('../middleware/auth');
 const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
 
 /**
@@ -46,6 +47,10 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  *                       type: object
  *                       description: Same items grouped by category key
  */
+
+// Public: featured FAQs for homepage (max 4)
+faqRouter.get('/featured', faqController.featuredFaqs);
+
 faqRouter.get('/', faqController.listFaqs);
 
 faqRouter.use(authenticate, requireLogisticsOrAbove);
@@ -106,6 +111,7 @@ faqRouter.patch('/:id', faqController.updateFaq);
  *       200:
  *         description: FAQ deleted
  */
+faqRouter.patch('/:id/toggle-featured', authenticate, requireSuperAdmin, faqController.toggleFeatured);
 faqRouter.delete('/:id', faqController.deleteFaq);
 
 module.exports = faqRouter;

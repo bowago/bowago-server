@@ -20,7 +20,6 @@ async function listFaqs(req, res) {
     orderBy: [{ category: 'asc' }, { sortOrder: 'asc' }],
   });
 
-  // Group by category for frontend
   const grouped = faqs.reduce((acc, faq) => {
     if (!acc[faq.category]) acc[faq.category] = [];
     acc[faq.category].push(faq);
@@ -30,9 +29,30 @@ async function listFaqs(req, res) {
   return success(res, { faqs, grouped });
 }
 
+// ─── Public: Featured FAQs (homepage) ────────────────────────────────────────
+// Returns up to 4 FAQs marked isFeatured:true, ordered by sortOrder.
+async function featuredFaqs(req, res) {
+  const faqs = await prisma.faqItem.findMany({
+    where: { isActive: true, isFeatured: true },
+    orderBy: { sortOrder: 'asc' },
+    take: 4,
+  });
+  return success(res, { faqs });
+}
+
 // ─── Admin: Create FAQ ────────────────────────────────────────────────────────
 async function createFaq(req, res) {
-  const { question, answer, category, sortOrder } = req.body;
+  const { question, answer, category, sortOrder, isFeatured } = req.body;
+
+  // Enforce max 4 featured
+  if (isFeatured) {
+    const featuredCount = await prisma.faqItem.count({
+      where: { isFeatured: true, isActive: true },
+    });
+    if (featuredCount >= 4) {
+      throw new ApiError(400, 'Maximum 4 FAQs can be featured on the homepage. Please un-feature an existing one first.');
+    }
+  }
 
   const faq = await prisma.faqItem.create({
     data: {
@@ -40,6 +60,7 @@ async function createFaq(req, res) {
       answer,
       category: category || 'OTHER',
       sortOrder: sortOrder || 0,
+      isFeatured: !!isFeatured,
       createdBy: req.user.id,
     },
   });
@@ -50,10 +71,24 @@ async function createFaq(req, res) {
 // ─── Admin: Update FAQ ────────────────────────────────────────────────────────
 async function updateFaq(req, res) {
   const { id } = req.params;
+  const { isFeatured, ...rest } = req.body;
+
+  // Enforce max 4 featured when featuring a new one
+  if (isFeatured === true) {
+    const current = await prisma.faqItem.findUnique({ where: { id } });
+    if (!current?.isFeatured) {
+      const featuredCount = await prisma.faqItem.count({
+        where: { isFeatured: true, isActive: true, NOT: { id } },
+      });
+      if (featuredCount >= 4) {
+        throw new ApiError(400, 'Maximum 4 FAQs can be featured. Please un-feature an existing one first.');
+      }
+    }
+  }
 
   const faq = await prisma.faqItem.update({
     where: { id },
-    data: req.body,
+    data: { ...rest, ...(isFeatured !== undefined && { isFeatured }) },
   });
 
   return success(res, { faq }, 'FAQ updated');
@@ -66,4 +101,27 @@ async function deleteFaq(req, res) {
   return success(res, {}, 'FAQ deleted');
 }
 
-module.exports = { listFaqs, createFaq, updateFaq, deleteFaq };
+// ─── Admin: Toggle Featured ───────────────────────────────────────────────────
+async function toggleFeatured(req, res) {
+  const { id } = req.params;
+  const faq = await prisma.faqItem.findUnique({ where: { id } });
+  if (!faq) throw new ApiError(404, 'FAQ not found');
+
+  if (!faq.isFeatured) {
+    const featuredCount = await prisma.faqItem.count({
+      where: { isFeatured: true, isActive: true },
+    });
+    if (featuredCount >= 4) {
+      throw new ApiError(400, 'Maximum 4 FAQs can be featured on the homepage. Un-feature one first.');
+    }
+  }
+
+  const updated = await prisma.faqItem.update({
+    where: { id },
+    data: { isFeatured: !faq.isFeatured },
+  });
+
+  return success(res, { faq: updated }, updated.isFeatured ? 'Added to homepage' : 'Removed from homepage');
+}
+
+module.exports = { listFaqs, featuredFaqs, createFaq, updateFaq, deleteFaq, toggleFeatured };

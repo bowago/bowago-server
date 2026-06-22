@@ -336,7 +336,9 @@ export const apiSlice = createApi({
       }
     >({
       query: ({ existingId, ...body }) => ({
-        url: existingId ? `/users/me/addresses/${existingId}` : `/users/me/addresses`,
+        url: existingId
+          ? `/users/me/addresses/${existingId}`
+          : `/users/me/addresses`,
         method: existingId ? "PUT" : "POST",
         body: { ...body, isDefault: true },
       }),
@@ -918,7 +920,9 @@ export const apiSlice = createApi({
           const { data } = await queryFulfilled;
           if (data) successToast("Invoice ready");
         } catch (error: any) {
-          errorToast(error.error?.data?.message || "Failed to generate invoice");
+          errorToast(
+            error.error?.data?.message || "Failed to generate invoice",
+          );
         }
       },
       invalidatesTags: ["Shipment"],
@@ -927,7 +931,10 @@ export const apiSlice = createApi({
     // useDownloadInvoiceMutation — fetches the invoice PDF as a blob and
     // triggers a browser download. Requires a paymentId (from
     // InitPendingPayment or an existing Payment record on the shipment).
-    DownloadInvoice: builder.mutation<void, { paymentId: string; filename?: string }>({
+    DownloadInvoice: builder.mutation<
+      void,
+      { paymentId: string; filename?: string }
+    >({
       query: ({ paymentId }) => ({
         url: `/invoices/${paymentId}/download`,
         method: "GET",
@@ -952,7 +959,11 @@ export const apiSlice = createApi({
           a.remove();
           window.URL.revokeObjectURL(url);
         } catch (error: any) {
-          errorToast(error?.data?.message || error?.error?.data?.message || "Failed to download invoice");
+          errorToast(
+            error?.data?.message ||
+              error?.error?.data?.message ||
+              "Failed to download invoice",
+          );
         }
       },
     }),
@@ -1047,7 +1058,8 @@ export const apiSlice = createApi({
       async onQueryStarted(_, { queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-          if (data) successToast((data as any)?.message || "City Deleted Successfully");
+          if (data)
+            successToast((data as any)?.message || "City Deleted Successfully");
         } catch (error: any) {
           // 409 = city has dependent zone/km routes — UI shows a confirmation
           // dialog for this instead of a generic error toast.
@@ -1198,9 +1210,12 @@ export const apiSlice = createApi({
     >({
       query: (params) => {
         const searchParams = new URLSearchParams();
-        if (params?.isActive) searchParams.append("isActive", params.isActive.toString());
-        if ((params as any)?.serviceType) searchParams.append("serviceType", (params as any).serviceType);
-        if ((params as any)?.zone) searchParams.append("zone", String((params as any).zone));
+        if (params?.isActive)
+          searchParams.append("isActive", params.isActive.toString());
+        if ((params as any)?.serviceType)
+          searchParams.append("serviceType", (params as any).serviceType);
+        if ((params as any)?.zone)
+          searchParams.append("zone", String((params as any).zone));
         return `/promo-rates?${searchParams.toString()}`;
       },
       providesTags: ["PromoRate"],
@@ -1220,9 +1235,12 @@ export const apiSlice = createApi({
       query: (params) => {
         const searchParams = new URLSearchParams();
         if (params?.zone) searchParams.append("zone", String(params.zone));
-        if (params?.serviceType) searchParams.append("serviceType", params.serviceType);
-        if (params?.minKg !== undefined) searchParams.append("minKg", String(params.minKg));
-        if (params?.maxKg !== undefined) searchParams.append("maxKg", String(params.maxKg));
+        if (params?.serviceType)
+          searchParams.append("serviceType", params.serviceType);
+        if (params?.minKg !== undefined)
+          searchParams.append("minKg", String(params.minKg));
+        if (params?.maxKg !== undefined)
+          searchParams.append("maxKg", String(params.maxKg));
         if (params?.isActive) searchParams.append("isActive", params.isActive);
         return `/pricing/price-bands?${searchParams.toString()}`;
       },
@@ -1363,7 +1381,13 @@ export const apiSlice = createApi({
     // useGetZoneQuery
     GetZone: builder.query<
       any,
-      { fromCity?: string; toCity?: string; page?: number; limit?: number; isActive?: string }
+      {
+        fromCity?: string;
+        toCity?: string;
+        page?: number;
+        limit?: number;
+        isActive?: string;
+      }
     >({
       query: (params) => {
         const searchParams = new URLSearchParams();
@@ -1502,16 +1526,18 @@ export const apiSlice = createApi({
       query: () => "/admin/roles/capabilities",
     }),
     // useGetAdminRolesQuery — list all staff with custom role assignments
-    GetAdminRoles: builder.query<any, { page?: number; limit?: number } | void>({
-      query: (params) => {
-        const searchParams = new URLSearchParams();
-        if (params?.page) searchParams.append("page", String(params.page));
-        if (params?.limit) searchParams.append("limit", String(params.limit));
-        const qs = searchParams.toString();
-        return `/admin/roles${qs ? `?${qs}` : ""}`;
+    GetAdminRoles: builder.query<any, { page?: number; limit?: number } | void>(
+      {
+        query: (params) => {
+          const searchParams = new URLSearchParams();
+          if (params?.page) searchParams.append("page", String(params.page));
+          if (params?.limit) searchParams.append("limit", String(params.limit));
+          const qs = searchParams.toString();
+          return `/admin/roles${qs ? `?${qs}` : ""}`;
+        },
+        providesTags: ["AdminRole"],
       },
-      providesTags: ["AdminRole"],
-    }),
+    ),
     // useGetAdminRoleQuery — get one user's capability set
     GetAdminRole: builder.query<any, { userId: string }>({
       query: ({ userId }) => `/admin/roles/${userId}`,
@@ -1546,7 +1572,10 @@ export const apiSlice = createApi({
       async onQueryStarted(_, { queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-          if (data) successToast((data as any)?.message || "Custom role assigned successfully");
+          if (data)
+            successToast(
+              (data as any)?.message || "Custom role assigned successfully",
+            );
         } catch (e: any) {
           errorToast(e.error?.data?.message || "Failed to assign custom role");
         }
@@ -1582,7 +1611,8 @@ export const apiSlice = createApi({
       async onQueryStarted(_, { queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-          if (data) successToast((data as any)?.message || "Custom role revoked");
+          if (data)
+            successToast((data as any)?.message || "Custom role revoked");
         } catch (e: any) {
           errorToast(e.error?.data?.message || "Failed to revoke custom role");
         }
@@ -1615,7 +1645,10 @@ export const apiSlice = createApi({
       async onQueryStarted(_, { queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-          if (data) successToast((data as any)?.message || "Webhook re-processed successfully");
+          if (data)
+            successToast(
+              (data as any)?.message || "Webhook re-processed successfully",
+            );
         } catch (e: any) {
           errorToast(e.error?.data?.message || "Retry failed");
         }
@@ -1765,11 +1798,14 @@ export const apiSlice = createApi({
           window.URL.revokeObjectURL(url);
           successToast("Pricing data exported");
         } catch (error: any) {
-          errorToast(error?.data?.message || error?.error?.data?.message || "Export failed");
+          errorToast(
+            error?.data?.message ||
+              error?.error?.data?.message ||
+              "Export failed",
+          );
         }
       },
     }),
-
 
     // useGetNotificationsQuery
     GetNotifications: builder.query<any, { page?: number } | void>({
@@ -1793,23 +1829,26 @@ export const apiSlice = createApi({
       async onQueryStarted(_, { queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-          if (data) successToast((data as any)?.message || "Verification code sent");
+          if (data)
+            successToast((data as any)?.message || "Verification code sent");
         } catch (e: any) {
           errorToast(e.error?.data?.message || "2FA setup failed");
         }
       },
     }),
-    Verify2FA: builder.mutation<any, { otp: string; method?: "EMAIL" | "SMS" }>({
-      query: (body) => ({ url: "/auth/verify-2fa", method: "POST", body }),
-      async onQueryStarted(_, { queryFulfilled }) {
-        try {
-          const { data } = await queryFulfilled;
-          if (data) successToast("Two-factor authentication enabled");
-        } catch (e: any) {
-          errorToast(e.error?.data?.message || "Verification failed");
-        }
+    Verify2FA: builder.mutation<any, { otp: string; method?: "EMAIL" | "SMS" }>(
+      {
+        query: (body) => ({ url: "/auth/verify-2fa", method: "POST", body }),
+        async onQueryStarted(_, { queryFulfilled }) {
+          try {
+            const { data } = await queryFulfilled;
+            if (data) successToast("Two-factor authentication enabled");
+          } catch (e: any) {
+            errorToast(e.error?.data?.message || "Verification failed");
+          }
+        },
       },
-    }),
+    ),
     // useDisable2FAMutation
     Disable2FA: builder.mutation<any, { password: string }>({
       query: (body) => ({ url: "/auth/disable-2fa", method: "POST", body }),
@@ -1823,7 +1862,10 @@ export const apiSlice = createApi({
       },
     }),
     // useVerifyLogin2FAMutation — completes login after Login returns requires2FA:true
-    VerifyLogin2FA: builder.mutation<AuthResponse, { email: string; otp: string }>({
+    VerifyLogin2FA: builder.mutation<
+      AuthResponse,
+      { email: string; otp: string }
+    >({
       query: (body) => ({ url: "/auth/login-2fa", method: "POST", body }),
       async onQueryStarted(_, { dispatch, queryFulfilled }) {
         try {
@@ -1901,7 +1943,6 @@ export const apiSlice = createApi({
       invalidatesTags: ["User"],
     }),
 
-
     // useDeleteAccountMutation — lets a customer delete their own account
     DeleteAccount: builder.mutation<any, { password: string }>({
       query: (body) => ({
@@ -1943,7 +1984,15 @@ export const apiSlice = createApi({
     }),
 
     // useMarkAsPaidMutation — Admin: manually record offline payment
-    MarkAsPaid: builder.mutation<any, { shipmentId: string; method?: string; reference?: string; notes?: string }>({
+    MarkAsPaid: builder.mutation<
+      any,
+      {
+        shipmentId: string;
+        method?: string;
+        reference?: string;
+        notes?: string;
+      }
+    >({
       query: ({ shipmentId, ...body }) => ({
         url: `/payments/${shipmentId}/mark-paid`,
         method: "POST",
@@ -1961,7 +2010,10 @@ export const apiSlice = createApi({
     }),
 
     // useWaivePaymentMutation — Super Admin: waive/comp a shipment
-    WaivePayment: builder.mutation<any, { shipmentId: string; reason?: string }>({
+    WaivePayment: builder.mutation<
+      any,
+      { shipmentId: string; reason?: string }
+    >({
       query: ({ shipmentId, ...body }) => ({
         url: `/payments/${shipmentId}/waive`,
         method: "POST",
