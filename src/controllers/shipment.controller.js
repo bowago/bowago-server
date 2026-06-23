@@ -278,14 +278,23 @@ async function trackShipment(req, res) {
     select: {
       trackingNumber: true,
       status: true,
+      serviceType: true,
+      senderName: true,
       senderCity: true,
       senderState: true,
+      senderAddress: true,
       recipientName: true,
       recipientCity: true,
       recipientState: true,
+      recipientAddress: true,
+      customerId: true,
       pickupDate: true,
       estimatedDelivery: true,
       deliveredAt: true,
+      quotedPrice: true,
+      weight: true,
+      weightUnit: true,
+      cartons: true,
       trackingHistory: {
         orderBy: { createdAt: "asc" },
         select: {
@@ -303,7 +312,26 @@ async function trackShipment(req, res) {
 
   if (!shipment) throw new ApiError(404, "Tracking number not found");
 
-  return success(res, { shipment });
+  // ── Address masking for unauthenticated/public access ─────────────────────
+  // PRD Sprint 4: Non-logged-in users see only city/state, not full street.
+  // Logged-in users who own the shipment see full addresses.
+  const viewerId = req.user?.id;
+  const isOwner = viewerId && viewerId === shipment.customerId;
+
+  const masked = {
+    ...shipment,
+    senderAddress: isOwner ? shipment.senderAddress : null,
+    recipientAddress: isOwner ? shipment.recipientAddress : null,
+    // Mask recipient full name for non-owners (show first name + initial only)
+    recipientName: isOwner
+      ? shipment.recipientName
+      : shipment.recipientName?.split(" ")[0] + " ***",
+  };
+
+  // Remove internal fields from response
+  delete masked.customerId;
+
+  return success(res, { shipment: masked });
 }
 
 // ─── UPDATE STATUS (Admin) ────────────────────────────────────────────────────

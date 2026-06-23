@@ -225,6 +225,20 @@ async function verifyPayment(reference) {
       });
 
       console.log(`📧 Booking confirmation + label sent to ${user.email}`);
+
+      // Payment receipt email (separate from booking confirmation)
+      try {
+        await sendPaymentSuccessEmail({
+          to: user.email,
+          firstName: user.firstName,
+          amount: tx.amount / 100,
+          trackingNumber: shipment.trackingNumber,
+          reference,
+        });
+        console.log(`📧 Payment receipt sent to ${user.email}`);
+      } catch (receiptErr) {
+        console.error("Payment receipt email error:", receiptErr.message);
+      }
     } catch (emailErr) {
       // Non-blocking — payment already verified, don't fail because of email
       console.error("Post-payment email error:", emailErr.message);
