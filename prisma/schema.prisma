@@ -36,6 +36,8 @@ enum AuthProvider {
 
 enum ShipmentStatus {
   PENDING
+  BOOKED
+  AWAITING_PICKUP
   CONFIRMED
   PICKED_UP
   IN_TRANSIT

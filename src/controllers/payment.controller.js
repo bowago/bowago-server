@@ -447,10 +447,10 @@ async function markAsPaid(req, res) {
     });
   }
 
-  // Update shipment payment status
+  // Update shipment payment status — PRD: Paid → AWAITING_PICKUP
   await prisma.shipment.update({
     where: { id: shipmentId },
-    data: { paymentStatus: 'PAID' },
+    data: { paymentStatus: 'PAID', status: 'AWAITING_PICKUP' },
   });
 
   return success(res, { payment }, 'Shipment marked as paid successfully');

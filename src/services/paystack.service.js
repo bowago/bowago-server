@@ -155,12 +155,12 @@ async function verifyPayment(reference) {
   }
 
   if (isPaid && payment.shipmentId) {
-    // Update shipment
+    // PRD Sprint 3 state machine: Quoted → Booked → Paid → AWAITING_PICKUP
     await prisma.shipment.update({
       where: { id: payment.shipmentId },
       data: {
         paymentStatus: "PAID",
-        status: "CONFIRMED",
+        status: "AWAITING_PICKUP",
         finalPrice: tx.amount / 100,
       },
     });
@@ -169,8 +169,8 @@ async function verifyPayment(reference) {
     await prisma.trackingEvent.create({
       data: {
         shipmentId: payment.shipmentId,
-        status: "CONFIRMED",
-        description: `Payment confirmed via ${tx.channel || "card"}. Shipment is now confirmed.`,
+        status: "AWAITING_PICKUP",
+        description: `Payment confirmed via ${tx.channel || "card"}. Shipment is awaiting pickup.`,
       },
     });
 

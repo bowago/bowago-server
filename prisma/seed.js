@@ -465,6 +465,40 @@ async function main() {
   }
   console.log("✅ App settings seeded");
 
+  // ─── Delivery SLA defaults per zone × service type ──────────────────────────
+  // Zone 1 = same region (e.g. Lagos → Lagos)
+  // Zone 2 = neighbouring state (e.g. Lagos → Ogun)
+  // Zone 3 = mid-distance (e.g. Lagos → Abuja)
+  // Zone 4 = long-haul cross-country (e.g. Lagos → Maiduguri)
+  // Admin can override these via PATCH /pricing/delivery-sla/:id
+  const slaRows = [
+    // Zone 1 — same region
+    { zone: 1, serviceType: "EXPRESS",  minDays: 1, maxDays: 1, label: "Same day – next day" },
+    { zone: 1, serviceType: "STANDARD", minDays: 1, maxDays: 2, label: "1–2 business days" },
+    { zone: 1, serviceType: "ECONOMY",  minDays: 2, maxDays: 4, label: "2–4 business days" },
+    // Zone 2 — neighbouring state
+    { zone: 2, serviceType: "EXPRESS",  minDays: 1, maxDays: 2, label: "1–2 business days" },
+    { zone: 2, serviceType: "STANDARD", minDays: 2, maxDays: 4, label: "2–4 business days" },
+    { zone: 2, serviceType: "ECONOMY",  minDays: 4, maxDays: 7, label: "4–7 business days" },
+    // Zone 3 — mid-distance
+    { zone: 3, serviceType: "EXPRESS",  minDays: 2, maxDays: 3, label: "2–3 business days" },
+    { zone: 3, serviceType: "STANDARD", minDays: 3, maxDays: 5, label: "3–5 business days" },
+    { zone: 3, serviceType: "ECONOMY",  minDays: 5, maxDays: 10, label: "5–10 business days" },
+    // Zone 4 — long-haul
+    { zone: 4, serviceType: "EXPRESS",  minDays: 3, maxDays: 5, label: "3–5 business days" },
+    { zone: 4, serviceType: "STANDARD", minDays: 5, maxDays: 7, label: "5–7 business days" },
+    { zone: 4, serviceType: "ECONOMY",  minDays: 7, maxDays: 14, label: "7–14 business days" },
+  ];
+
+  for (const sla of slaRows) {
+    await prisma.deliverySLA.upsert({
+      where: { zone_serviceType: { zone: sla.zone, serviceType: sla.serviceType } },
+      update: { minDays: sla.minDays, maxDays: sla.maxDays, label: sla.label },
+      create: sla,
+    });
+  }
+  console.log("✅ Delivery SLA defaults seeded (4 zones × 3 service types = 12 rows)");
+
   console.log("\n🎉 Seeding complete!");
   console.log(
     "📝 NOTE: Import zone matrix and KM data using POST /api/v1/pricing/import with the Rating_For_BowaGO.xlsx file",

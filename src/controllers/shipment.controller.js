@@ -2,6 +2,7 @@ const { prisma } = require("../config/db");
 const { calculateShippingCost } = require("../services/pricing.service");
 const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
+const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { ApiError } = require("../utils/ApiError");
 const {
   success,
@@ -28,6 +29,9 @@ async function recordConsent(userId, consentType, req) {
 
 // ─── CREATE SHIPMENT ──────────────────────────────────────────────────────────
 async function createShipment(req, res) {
+  console.log('[createShipment] START — body keys:', Object.keys(req.body));
+  console.log('[createShipment] user:', req.user?.id, 'role:', req.user?.role);
+
   const {
     senderName,
     senderPhone,
@@ -57,26 +61,22 @@ async function createShipment(req, res) {
     quoteId,
   } = req.body;
 
-  // insuranceValue: frontend can omit entirely — backend auto-calculates at 110% of base price.
-  // ─── Quote-to-Booking price lock ──────────────────────────────────────────
-  // If the frontend passes a quoteId (from POST /quote), the price, zone,
-  // distance, weight, and service type are LOCKED from that quote record —
-  // we do NOT recalculate, so rate changes between quoting and booking can't
-  // affect what the customer pays.
+  console.log('[createShipment] route:', senderCity, '→', recipientCity, '| quoteId:', quoteId || 'none');
+  console.log('[createShipment] weight params — weightKg:', weightKg, 'tons:', tons, 'cartons:', cartons, 'boxDimensionId:', boxDimensionId);
+
   let lockedQuote = null;
   let quote;
   let quotedPrice;
   let resolvedServiceType = serviceType || "STANDARD";
   let resolvedInsuranceValue = requiresInsurance
-    ? (insuranceValue || null) // null tells pricing service to auto-calculate
+    ? (insuranceValue || null)
     : 0;
 
   if (quoteId) {
+    console.log('[createShipment] using locked quote:', quoteId);
     lockedQuote = await prisma.quote.findUnique({ where: { id: quoteId } });
     if (!lockedQuote) throw new ApiError(404, "Quote not found");
 
-    // Guests can convert their own quote; logged-in users can only convert
-    // quotes generated under their account (or anonymous quotes).
     if (lockedQuote.userId && lockedQuote.userId !== req.user.id) {
       throw new ApiError(403, "This quote does not belong to your account");
     }
@@ -100,12 +100,11 @@ async function createShipment(req, res) {
       throw new ApiError(400, "Quote references a city that no longer exists. Please generate a new quote.");
     }
 
-    // Make sure the booking route matches what was quoted — prevents reusing
-    // a cheap quote for a different (more expensive) route.
     if (
       fromCityRec.name.toLowerCase() !== String(senderCity ?? "").toLowerCase() ||
       toCityRec.name.toLowerCase() !== String(recipientCity ?? "").toLowerCase()
     ) {
+      console.log('[createShipment] city mismatch — quoted:', fromCityRec.name, toCityRec.name, '| sent:', senderCity, recipientCity);
       throw new ApiError(400, "Sender/recipient cities do not match the quoted route. Please generate a new quote.");
     }
 
@@ -117,8 +116,6 @@ async function createShipment(req, res) {
       toCity: toCityRec,
     };
 
-    // Locked price — includes surcharges, VAT, and insurance premium as
-    // calculated at quote time.
     quotedPrice = lockedQuote.totalPriceKobo / 100;
     resolvedServiceType = lockedQuote.serviceType;
 
@@ -126,7 +123,7 @@ async function createShipment(req, res) {
       resolvedInsuranceValue = lockedQuote.declaredValueKobo / 100;
     }
   } else {
-    // No quote reference — calculate live (legacy / direct-booking flow)
+    console.log('[createShipment] no quoteId — calculating live price');
     quote = await calculateShippingCost({
       fromCity: senderCity,
       toCity: recipientCity,
@@ -143,31 +140,31 @@ async function createShipment(req, res) {
       insuranceValue: resolvedInsuranceValue,
       userId: req.user?.id,
     });
-
-    // quotedPrice already includes all surcharges from calculateShippingCost
     quotedPrice = quote.total;
   }
 
-  // Zone-aware estimated delivery using admin-configurable SLA table
-  // PRD Sprint 3: bookings after 2:00 PM → earliest pickup is next business day
+  console.log('[createShipment] quote resolved — zone:', quote.zone, 'weightKg:', quote.weightKg, 'quotedPrice:', quotedPrice);
+
   let resolvedPickupDate = pickupDate ? new Date(pickupDate) : new Date();
   let cutoffWarning = false;
 
-  const nowWAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' }));
-  const bookingHour = nowWAT.getHours();
-
-  if (bookingHour >= 14) {
-    // After 2PM WAT — advance pickup to next business day
-    cutoffWarning = true;
-    if (!pickupDate) {
-      // Auto-advance to next business day
-      const next = new Date(nowWAT);
-      next.setDate(next.getDate() + 1);
-      while (next.getDay() === 0 || next.getDay() === 6) {
+  try {
+    const nowWAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' }));
+    const bookingHour = nowWAT.getHours();
+    if (bookingHour >= 14) {
+      cutoffWarning = true;
+      if (!pickupDate) {
+        const next = new Date(nowWAT);
         next.setDate(next.getDate() + 1);
+        while (next.getDay() === 0 || next.getDay() === 6) {
+          next.setDate(next.getDate() + 1);
+        }
+        resolvedPickupDate = next;
       }
-      resolvedPickupDate = next;
     }
+    console.log('[createShipment] cutoffWarning:', cutoffWarning, '| resolvedPickupDate:', resolvedPickupDate);
+  } catch (tzErr) {
+    console.warn('[createShipment] timezone error (non-fatal):', tzErr.message);
   }
 
   const slaResult = await getEstimatedDelivery(
@@ -175,7 +172,10 @@ async function createShipment(req, res) {
     resolvedServiceType,
     resolvedPickupDate
   );
+  console.log('[createShipment] SLA estimated delivery:', slaResult.estimatedDelivery);
 
+  // PRD Sprint 3 state machine: Quoted → BOOKED (on creation) → Paid → Awaiting Pickup
+  console.log('[createShipment] creating shipment record in DB...');
   const shipment = await prisma.shipment.create({
     data: {
       trackingNumber: generateTrackingNumber(),
@@ -194,26 +194,26 @@ async function createShipment(req, res) {
       weight: quote.weightKg,
       weightUnit: weightUnit || "KG",
       cartons: cartons ? parseInt(cartons) : null,
-      boxDimensionId,
-      customLength,
-      customWidth,
-      customHeight,
-      fromCityId: quote.fromCity.id,
-      toCityId: quote.toCity.id,
-      zone: quote.zone,
-      distanceKm: quote.distanceKm,
+      boxDimensionId: boxDimensionId || null,
+      customLength: customLength || null,
+      customWidth: customWidth || null,
+      customHeight: customHeight || null,
+      fromCityId: quote.fromCity?.id || null,
+      toCityId: quote.toCity?.id || null,
+      zone: quote.zone || null,
+      distanceKm: quote.distanceKm || null,
       serviceType: resolvedServiceType,
       quotedPrice,
       isFragile: !!isFragile,
       requiresInsurance: !!requiresInsurance,
-      insuranceValue: resolvedInsuranceValue,
-      notes,
+      insuranceValue: resolvedInsuranceValue || null,
+      notes: notes || null,
       pickupDate: resolvedPickupDate,
       estimatedDelivery: slaResult.estimatedDelivery,
       trackingHistory: {
         create: {
           status: "PENDING",
-          description: "Shipment created and awaiting confirmation",
+          description: "Shipment booked and awaiting payment",
           updatedBy: req.user.id,
         },
       },
@@ -225,20 +225,22 @@ async function createShipment(req, res) {
     },
   });
 
-  // Consume the quote so it can't be reused for another booking
+  console.log('[createShipment] shipment created — id:', shipment.id, 'tracking:', shipment.trackingNumber);
+
   if (lockedQuote) {
     await prisma.quote.update({
       where: { id: lockedQuote.id },
-      data: { status: "EXPIRED" },
+      data: { status: "BOOKED", bookedAt: new Date(), shipmentId: shipment.id },
     });
+    console.log('[createShipment] quote marked BOOKED');
   }
+
+  // Sprint 7: SHIPPING_RULES consent (fire-and-forget)
+  recordConsent(req.user.id, 'SHIPPING_RULES', req);
 
   return created(res, { shipment, quote, cutoffWarning }, cutoffWarning
     ? 'Shipment created. Booking after 2PM — earliest pickup is next business day.'
     : 'Shipment created successfully');
-
-  // Sprint 7: Record SHIPPING_RULES consent (fire-and-forget after response)
-  recordConsent(req.user.id, 'SHIPPING_RULES', req);
 }
 
 // ─── LIST SHIPMENTS (Customer) ────────────────────────────────────────────────
