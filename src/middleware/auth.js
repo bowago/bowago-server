@@ -67,8 +67,7 @@ function requireSuperAdmin(req, res, next) {
   next();
 }
 
-// Covers: SUPER_ADMIN, LOGISTICS_MANAGER (legacy), ROLE_ADMIN, ROLE_AGENT, ROLE_MASTER,
-//         ROLE_DISPATCHER, ROLE_FINANCE — i.e. any ADMIN-role user
+// Covers any ADMIN-role user — used for generic read-only admin views
 function requireLogisticsOrAbove(req, res, next) {
   if (req.user.role !== 'ADMIN') {
     throw new ApiError(403, 'Admin access required');
@@ -76,32 +75,86 @@ function requireLogisticsOrAbove(req, res, next) {
   next();
 }
 
-// ─── PRD v2 Sub-Role Guards ────────────────────────────────────────────────────
-// Use these for routes that correspond to specific PRD role capabilities.
-// They all accept SUPER_ADMIN + LOGISTICS_MANAGER (backward compat) in addition
-// to the named role — so existing integrations don't break.
+// ─── PRD v2 RBAC ──────────────────────────────────────────────────────────────
+//
+// SUPER_ADMIN   → bypasses ALL guards (full system access)
+// LOGISTICS_MANAGER → legacy alias for SUPER_ADMIN, same bypass
+// ROLE_DISPATCHER   → named sub-role for shipment operations
+// ROLE_FINANCE      → named sub-role for invoice/payment operations
+// ROLE_AGENT        → named sub-role for ticket/CS operations
+// ROLE_MASTER       → named sub-role for org/team management
+// ROLE_ADMIN        → custom capability flags set by SUPER_ADMIN
+//
+// Guard priority:
+//   1. SUPER_ADMIN / LOGISTICS_MANAGER → always pass
+//   2. Explicit named sub-role match   → pass
+//   3. ROLE_ADMIN with matching capability flag → pass
+//   4. Otherwise → 403
 
 const SUPER_COMPAT = ['SUPER_ADMIN', 'LOGISTICS_MANAGER'];
 
+// Map each named sub-role to its equivalent capability flag.
+// When a ROLE_ADMIN has this capability, they can do what the named role does.
+const SUBROLE_TO_CAPABILITY = {
+  ROLE_DISPATCHER: 'canManageShipments',
+  ROLE_FINANCE:    'canManageInvoices',
+  ROLE_AGENT:      'canManageTickets',
+  ROLE_MASTER:     'canManageOrganization',
+};
+
+/**
+ * requireSubRole('ROLE_DISPATCHER')
+ * Allows: SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_DISPATCHER,
+ *         and ROLE_ADMIN with canManageShipments capability.
+ */
 function requireSubRole(...subRoles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (req.user.role !== 'ADMIN') throw new ApiError(403, 'Admin access required');
-    const allowed = [...subRoles, ...SUPER_COMPAT];
-    if (!allowed.includes(req.user.adminSubRole)) {
-      throw new ApiError(403, `Access requires one of: ${subRoles.join(', ')}`);
+
+    // SUPER_ADMIN and LOGISTICS_MANAGER bypass everything
+    if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
+
+    // Named sub-role match
+    if (subRoles.includes(req.user.adminSubRole)) return next();
+
+    // ROLE_ADMIN: check if they have the equivalent capability for any of the required sub-roles
+    if (req.user.adminSubRole === 'ROLE_ADMIN') {
+      const requiredCaps = subRoles
+        .map(r => SUBROLE_TO_CAPABILITY[r])
+        .filter(Boolean);
+
+      if (requiredCaps.length > 0) {
+        const perm = await prisma.adminRolePermission.findUnique({
+          where: { userId: req.user.id },
+        });
+        if (perm && requiredCaps.some(cap => perm[cap])) return next();
+      }
     }
-    next();
+
+    throw new ApiError(403, `Access requires one of: ${subRoles.join(', ')}`);
   };
 }
 
-// Capability-based guard for ROLE_ADMIN custom roles
-// Checks AdminRolePermission table for specific capability flag
+/**
+ * requireCapability('canManageRates')
+ * Allows: SUPER_ADMIN, LOGISTICS_MANAGER,
+ *         and ROLE_ADMIN with the matching capability flag.
+ * All other named sub-roles (DISPATCHER, FINANCE, etc.) are denied
+ * unless SUPER_ADMIN grants them the capability via ROLE_ADMIN assignment.
+ */
 function requireCapability(capability) {
   return async (req, res, next) => {
     if (req.user.role !== 'ADMIN') throw new ApiError(403, 'Admin access required');
 
-    // SUPER_ADMIN and LOGISTICS_MANAGER bypass capability checks
+    // SUPER_ADMIN and LOGISTICS_MANAGER bypass all capability checks
     if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
+
+    // Named sub-roles (DISPATCHER, FINANCE, etc.) do NOT have capabilities
+    // unless they are also assigned ROLE_ADMIN with the flag.
+    // Check AdminRolePermission for ROLE_ADMIN only.
+    if (req.user.adminSubRole !== 'ROLE_ADMIN') {
+      throw new ApiError(403, `You don't have the "${capability}" capability`);
+    }
 
     const perm = await prisma.adminRolePermission.findUnique({
       where: { userId: req.user.id },
@@ -114,7 +167,7 @@ function requireCapability(capability) {
   };
 }
 
-// Shorthand helpers for common capability checks
+// ─── Shorthand capability guards ──────────────────────────────────────────────
 const requireRateManagement   = requireCapability('canManageRates');
 const requireUserManagement   = requireCapability('canManageUsers');
 const requireTicketManagement = requireCapability('canManageTickets');
@@ -123,6 +176,8 @@ const requireAnalyticsAccess  = requireCapability('canViewAnalytics');
 const requireAuditLogAccess   = requireCapability('canViewAuditLogs');
 const requireBulkNotify       = requireCapability('canBulkNotify');
 const requireClaimsAccess     = requireCapability('canManageClaims');
+const requireSurchargeManagement = requireCapability('canManageSurcharges');
+const requirePromoManagement     = requireCapability('canManagePromos');
 
 // ─── Optional Auth (for public + private combined routes) ─────────────────────
 async function optionalAuth(req, res, next) {
@@ -159,5 +214,7 @@ module.exports = {
   requireAuditLogAccess,
   requireBulkNotify,
   requireClaimsAccess,
+  requireSurchargeManagement,
+  requirePromoManagement,
   optionalAuth,
 };

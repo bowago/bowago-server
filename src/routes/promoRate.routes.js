@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/promoRate.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requirePromoManagement } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -54,7 +54,7 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
 router.post('/validate', ctrl.validatePromoCode);
 
 // ─── Admin routes ─────────────────────────────────────────────────────────────
-router.use(authenticate, requireLogisticsOrAbove);
+router.use(authenticate, requirePromoManagement); // PRD: canManagePromos capability
 
 /**
  * @swagger

@@ -78,16 +78,64 @@ async function resendOtp(req, res) {
   return success(res, {}, 'Verification code sent');
 }
 
+// ─── LOGIN LOCKOUT HELPERS ────────────────────────────────────────────────────
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS  = 15 * 60 * 1000; // 15 minutes
+
+async function checkLoginLockout(email) {
+  const record = await prisma.loginAttempt.findUnique({ where: { email } });
+  if (!record) return; // no failures yet
+  if (record.lockedUntil && new Date() < record.lockedUntil) {
+    const remainingMs = record.lockedUntil - new Date();
+    const remainingMin = Math.ceil(remainingMs / 60000);
+    throw new ApiError(
+      429,
+      `Account temporarily locked due to too many failed attempts. Try again in ${remainingMin} minute${remainingMin === 1 ? '' : 's'}.`
+    );
+  }
+}
+
+async function recordFailedLogin(email) {
+  const record = await prisma.loginAttempt.upsert({
+    where: { email },
+    create: { email, failedCount: 1, lastAttemptAt: new Date() },
+    update: { failedCount: { increment: 1 }, lastAttemptAt: new Date() },
+  });
+  // Lock after MAX_FAILED_ATTEMPTS
+  if (record.failedCount >= MAX_FAILED_ATTEMPTS) {
+    await prisma.loginAttempt.update({
+      where: { email },
+      data: { lockedUntil: new Date(Date.now() + LOCKOUT_DURATION_MS) },
+    });
+  }
+}
+
+async function clearLoginAttempts(email) {
+  await prisma.loginAttempt.deleteMany({ where: { email } });
+}
+
 // ─── LOGIN ────────────────────────────────────────────────────────────────────
 async function login(req, res) {
   const { email, password } = req.body;
 
+  // ─── PRD Sprint 2: Check lockout before any DB user lookup ──────────────
+  await checkLoginLockout(email);
+
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.passwordHash) throw new ApiError(401, 'Invalid email or password');
+  if (!user || !user.passwordHash) {
+    // Still record the failed attempt even for unknown emails (prevents enumeration timing)
+    await recordFailedLogin(email);
+    throw new ApiError(401, 'Invalid email or password');
+  }
   if (!user.isActive) throw new ApiError(403, 'Account suspended. Contact support.');
 
   const isValid = await bcrypt.compare(password, user.passwordHash);
-  if (!isValid) throw new ApiError(401, 'Invalid email or password');
+  if (!isValid) {
+    await recordFailedLogin(email);
+    throw new ApiError(401, 'Invalid email or password');
+  }
+  // Successful password check — clear lockout
+  await clearLoginAttempts(email);
 
   if (!user.isEmailVerified) {
     await sendOtp(user.id, email, 'EMAIL_VERIFY');
@@ -95,18 +143,30 @@ async function login(req, res) {
   }
 
   // ─── 2FA challenge ──────────────────────────────────────────────────────
-  // If the user has 2FA enabled, don't issue tokens yet — send a one-time
-  // code and require POST /auth/login-2fa with { email, otp } to finish.
+  // PRD Sprint 2: "SMS fails → Email fallback automatically. Both fail → 503"
   if (user.twoFactorEnabled) {
+    let deliveryChannel = 'EMAIL';
     if (user.twoFactorMethod === 'SMS' && user.phone) {
-      await sendOtp(user.id, user.phone, 'TWO_FACTOR_LOGIN', 'SMS');
+      try {
+        await sendOtp(user.id, user.phone, 'TWO_FACTOR_LOGIN', 'SMS');
+        deliveryChannel = 'SMS';
+      } catch (smsErr) {
+        // SMS failed — auto-fallback to email per PRD
+        try {
+          await sendOtp(user.id, email, 'TWO_FACTOR_LOGIN', 'EMAIL');
+          deliveryChannel = 'EMAIL';
+        } catch (emailErr) {
+          throw new ApiError(503, 'Unable to send verification code. Please try again later.');
+        }
+      }
     } else {
       await sendOtp(user.id, email, 'TWO_FACTOR_LOGIN', 'EMAIL');
     }
     return success(res, {
       requires2FA: true,
       email: user.email,
-    }, 'Verification code sent to your email. Enter it to complete login.');
+      deliveryChannel,
+    }, `Verification code sent via ${deliveryChannel === 'SMS' ? 'SMS' : 'email'}. Enter it to complete login.`);
   }
 
   const tokens = await generateTokenPair(user, req.headers['user-agent'], req.ip);

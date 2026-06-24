@@ -14,7 +14,7 @@ function buildConnectionUrl() {
   const sep = url.includes("?") ? "&" : "?";
   // Only append if not already configured
   if (url.includes("connection_limit")) return url;
-  return `${url}${sep}connection_limit=5&pool_timeout=10&connect_timeout=15`;
+  return `${url}${sep}connection_limit=5&pool_timeout=30&connect_timeout=30`;
 }
 
 const basePrisma = new PrismaClient({

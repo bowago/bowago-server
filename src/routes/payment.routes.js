@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const paymentController = require('../controllers/payment.controller');
-const { authenticate, requireLogisticsOrAbove, requireSuperAdmin, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSuperAdmin, requireAdmin, requireInvoiceAccess } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -311,7 +311,7 @@ router.post('/:reference/refund', paymentController.refundHandler);
  *       403:
  *         description: Admin access required
  */
-router.get('/', requireLogisticsOrAbove, paymentController.adminListPayments);
+router.get('/', requireInvoiceAccess, paymentController.adminListPayments); // PRD: ROLE_FINANCE / canManageInvoices
 
 /**
  * @swagger
@@ -347,7 +347,7 @@ router.get('/', requireLogisticsOrAbove, paymentController.adminListPayments);
  *       403:
  *         description: Admin access required
  */
-router.get('/stats', requireLogisticsOrAbove, paymentController.paymentStats);
+router.get('/stats', requireInvoiceAccess, paymentController.paymentStats); // PRD: ROLE_FINANCE / canManageInvoices
 
 /**
  * @swagger
@@ -393,7 +393,7 @@ router.get('/stats', requireLogisticsOrAbove, paymentController.paymentStats);
  *               reference: { type: string, description: Bank reference or receipt number }
  *               notes: { type: string }
  */
-router.post('/:shipmentId/mark-paid', requireLogisticsOrAbove, paymentController.markAsPaid);
+router.post('/:shipmentId/mark-paid', requireInvoiceAccess, paymentController.markAsPaid); // PRD: ROLE_FINANCE
 
 /**
  * @swagger

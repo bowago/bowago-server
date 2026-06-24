@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const c = require('../controllers/contractRate.controller');
-const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSuperAdmin, requireRateManagement } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -39,7 +39,7 @@ const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('..
 router.get('/my', authenticate, c.getMyContractRate);
 
 // ─── Admin routes ─────────────────────────────────────────────────────────────
-router.use(authenticate, requireLogisticsOrAbove);
+router.use(authenticate, requireRateManagement); // PRD: rate management capability required
 
 /**
  * @swagger

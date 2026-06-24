@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const pricingController = require('../controllers/pricing.controller');
-const { authenticate, requireAdmin, requireLogisticsOrAbove, requireSuperAdmin } = require('../middleware/auth');
+const deliverySLAController = require('../controllers/deliverySLA.controller');
+const { authenticate, requireAdmin, requireLogisticsOrAbove, requireSuperAdmin, requireRateManagement } = require('../middleware/auth');
 const { uploadImport } = require('../config/cloudinary');
 
 /**
@@ -175,8 +176,10 @@ router.get('/dimensions', pricingController.listDimensions);
 router.get('/price-bands', pricingController.listPriceBands);
 
 // ─── Admin routes below ───────────────────────────────────────────────────────
+// PRD: only roles with canManageRates capability can write pricing data.
+// SUPER_ADMIN and LOGISTICS_MANAGER bypass capability checks automatically.
 router.use(authenticate);
-router.use(requireLogisticsOrAbove);
+router.use(requireRateManagement);
 
 /**
  * @swagger
@@ -529,6 +532,12 @@ router.post('/import', authenticate, requireAdmin, uploadImport.single('file'), 
  *       403:
  *         description: Super Admin access required
  */
+
+// ─── Delivery SLA (zone-based delivery days) ──────────────────────────────────
+router.get('/delivery-sla', deliverySLAController.listSLAs);
+router.patch('/delivery-sla/:id', authenticate, requireSuperAdmin, deliverySLAController.updateSLA);
+router.patch('/delivery-sla/zone/:zone/service/:serviceType', authenticate, requireSuperAdmin, deliverySLAController.updateSLAByZoneService);
+
 router.get('/export', authenticate, requireSuperAdmin, pricingController.exportPricingSheet);
 
 

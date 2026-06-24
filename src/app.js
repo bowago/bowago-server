@@ -229,6 +229,7 @@ app.use("/api/v1/contract-rates", contractRateRoutes);
 app.use("/api/v1/promo-rates", promoRateRoutes);
 app.use("/api/v1/quotes", quoteRoutes);
 app.use("/api/v1/admin/roles", adminRoleRoutes);
+app.use("/api/v1/organization", require("./routes/organization.routes"));
 
 app.get("/", (req, res) => {
   res.status(200).json({

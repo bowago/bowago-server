@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const notifController = require('../controllers/notification.controller');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireBulkNotify } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -79,6 +79,9 @@ router.get('/', notifController.listNotifications);
  *       401:
  *         description: Unauthorized
  */
+router.get('/unread-count', notifController.getUnreadCount);
+router.patch('/mark-all-read', notifController.markAllRead);
+
 router.patch('/:id/read', notifController.markRead);
 
 /**
@@ -99,6 +102,29 @@ router.patch('/:id/read', notifController.markRead);
  *         description: Unauthorized
  */
 router.delete('/:id', notifController.deleteNotification);
+
+/**
+ * @swagger
+ * /notifications/bulk:
+ *   delete:
+ *     summary: Bulk delete notifications
+ *     tags: [Notifications]
+ *     description: Delete multiple notifications by ID array. Omit ids to delete all.
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items: { type: string, format: uuid }
+ *                 description: IDs to delete. Omit to delete ALL notifications.
+ *     responses:
+ *       200:
+ *         description: Notifications deleted
+ */
+router.delete('/bulk', notifController.bulkDeleteNotifications);
 
 /**
  * @swagger
@@ -176,6 +202,6 @@ router.post('/fcm-token', notifController.updateFcmToken);
  *       403:
  *         description: Admin access required
  */
-router.post('/broadcast', requireAdmin, notifController.broadcastNotification);
+router.post('/broadcast', requireBulkNotify, notifController.broadcastNotification); // PRD: canBulkNotify capability
 
 module.exports = router;

@@ -8,6 +8,25 @@ const QUOTE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 // ─── Convert Naira to Kobo (avoid float errors per PRD) ──────────────────────
 function toKobo(naira) { return Math.round(parseFloat(naira) * 100); }
 
+// ─── Sprint 7: Record user consent at quote time ─────────────────────────────
+async function recordConsent(userId, sessionId, consentType, req) {
+  try {
+    await prisma.consentLog.create({
+      data: {
+        userId:      userId || null,
+        sessionId:   sessionId || null,
+        consentType,
+        tcVersion:   process.env.TC_VERSION || 'v1.0',
+        ipAddress:   req.ip || req.headers['x-forwarded-for'] || null,
+        userAgent:   req.headers['user-agent'] || null,
+      },
+    });
+  } catch (err) {
+    // Non-blocking — consent logging failure must not break the flow
+    console.error('[Consent] Failed to record consent:', err.message);
+  }
+}
+
 // ─── Generate Quote (Public — no auth required) ───────────────────────────────
 async function generateQuote(req, res) {
   const {
@@ -18,7 +37,13 @@ async function generateQuote(req, res) {
     serviceType,
     insuranceSelected, declaredValue,
     promoCode,
+    termsAccepted, // Sprint 7: user must tick "I agree to Terms of Service"
   } = req.body;
+
+  // ─── Sprint 7: Terms consent check ──────────────────────────────────────
+  if (!termsAccepted) {
+    throw new ApiError(400, 'You must accept the Terms of Service to generate a quote.');
+  }
 
   const userId = req.user?.id || null;
 
@@ -103,7 +128,6 @@ async function generateQuote(req, res) {
       vatNaira:               record.vatKobo / 100,
       insurancePremiumNaira:  insurancePremiumKobo ? insurancePremiumKobo / 100 : null,
       totalNaira:             record.totalPriceKobo / 100,
-      // Kobo values (for internal use / audit)
       basePriceKobo:          record.basePriceKobo,
       totalPriceKobo:         record.totalPriceKobo,
     },
@@ -112,6 +136,10 @@ async function generateQuote(req, res) {
     surchargeBreakdown: quote.surchargeBreakdown,
     currency: 'NGN',
   }, 'Quote generated');
+
+  // ─── Sprint 7: Log TERMS_OF_SERVICE consent (non-blocking, after response) ─
+  // Fire-and-forget after res is sent — doesn't delay the client
+  await recordConsent(userId, req.headers['x-session-id'] || null, 'TERMS_OF_SERVICE', req);
 }
 
 // ─── Get Quote by ID ──────────────────────────────────────────────────────────

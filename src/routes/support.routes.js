@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const supportController = require('../controllers/support.controller');
-const { authenticate, requireAdmin, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireLogisticsOrAbove, requireTicketManagement, requireAnalyticsAccess } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -160,7 +160,7 @@ router.post('/tickets/:id/reply', supportController.replyToTicket);
  *       403:
  *         description: Admin access required
  */
-router.get('/tickets', requireLogisticsOrAbove, supportController.listTickets);
+router.get('/tickets', requireTicketManagement, supportController.listTickets); // PRD: ROLE_AGENT / canManageTickets
 
 /**
  * @swagger
@@ -186,7 +186,7 @@ router.get('/tickets', requireLogisticsOrAbove, supportController.listTickets);
  *       200:
  *         description: Ticket updated. Customer notified on RESOLVED.
  */
-router.patch('/tickets/:id', requireLogisticsOrAbove, supportController.updateTicket);
+router.patch('/tickets/:id', requireTicketManagement, supportController.updateTicket); // PRD: ROLE_AGENT / canManageTickets
 
 /**
  * @swagger
@@ -204,7 +204,7 @@ router.patch('/tickets/:id', requireLogisticsOrAbove, supportController.updateTi
  *       200:
  *         description: Canned responses returned
  */
-router.get('/canned-responses', requireLogisticsOrAbove, supportController.listCannedResponses);
+router.get('/canned-responses', requireTicketManagement, supportController.listCannedResponses); // PRD: ROLE_AGENT
 
 /**
  * @swagger
@@ -227,7 +227,7 @@ router.get('/canned-responses', requireLogisticsOrAbove, supportController.listC
  *       201:
  *         description: Canned response created
  */
-router.post('/canned-responses', requireLogisticsOrAbove, supportController.createCannedResponse);
+router.post('/canned-responses', requireTicketManagement, supportController.createCannedResponse); // PRD: ROLE_AGENT
 
 /**
  * @swagger
@@ -244,7 +244,7 @@ router.post('/canned-responses', requireLogisticsOrAbove, supportController.crea
  *       200:
  *         description: Updated
  */
-router.patch('/canned-responses/:id', requireLogisticsOrAbove, supportController.updateCannedResponse);
+router.patch('/canned-responses/:id', requireTicketManagement, supportController.updateCannedResponse); // PRD: ROLE_AGENT
 
 /**
  * @swagger
@@ -261,6 +261,70 @@ router.patch('/canned-responses/:id', requireLogisticsOrAbove, supportController
  *       200:
  *         description: Deleted
  */
-router.delete('/canned-responses/:id', requireLogisticsOrAbove, supportController.deleteCannedResponse);
+router.delete('/canned-responses/:id', requireTicketManagement, supportController.deleteCannedResponse); // PRD: ROLE_AGENT
+
+/**
+ * @swagger
+ * /support/kpi:
+ *   get:
+ *     summary: Agent KPI dashboard (Admin)
+ *     tags: [Support]
+ *     description: >
+ *       Returns per-agent metrics — response time, resolution time, CSAT score,
+ *       ticket volume, escalation count — for the specified date window (default 30 days).
+ *       Team-level totals are also included. PRD Sprint 6.
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (ISO 8601). Defaults to 30 days ago.
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (ISO 8601). Defaults to now.
+ *       - in: query
+ *         name: agentId
+ *         schema: { type: string, format: uuid }
+ *         description: Filter to a specific agent (omit for all agents).
+ *     responses:
+ *       200:
+ *         description: KPI report returned
+ *       403:
+ *         description: Admin access required
+ */
+router.get('/kpi', requireAnalyticsAccess, supportController.getAgentKpi); // PRD: canViewAnalytics
+
+/**
+ * @swagger
+ * /support/tickets/{id}/csat:
+ *   post:
+ *     summary: Submit CSAT rating for a resolved ticket (Customer)
+ *     tags: [Support]
+ *     description: Customer submits a 1–5 satisfaction score after a ticket is resolved. One submission per ticket.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [score]
+ *             properties:
+ *               score:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 example: 4
+ *     responses:
+ *       200:
+ *         description: Rating submitted
+ *       409:
+ *         description: Already rated
+ */
+router.post('/tickets/:id/csat', authenticate, supportController.submitCsat);
 
 module.exports = router;

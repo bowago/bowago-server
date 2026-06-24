@@ -12,11 +12,33 @@ const {
   replayDeadLetter,
 } = require("../services/webhook.service");
 
+// ─── Sprint 7: Consent helper ─────────────────────────────────────────────────
+async function recordConsent(userId, consentType, req) {
+  try {
+    await prisma.consentLog.create({
+      data: {
+        userId:    userId || null,
+        consentType,
+        tcVersion: process.env.TC_VERSION || 'v1.0',
+        ipAddress: req.ip || req.headers['x-forwarded-for'] || null,
+        userAgent: req.headers['user-agent'] || null,
+      },
+    });
+  } catch (err) {
+    console.error('[Consent] Failed to log payment consent:', err.message);
+  }
+}
+
 // ─── Initialize Payment ───────────────────────────────────────────────────────
 async function initPayment(req, res) {
-  const { shipmentId } = req.body;
+  const { shipmentId, refundPolicyAccepted } = req.body;
   const userId = req.user.id;
   const email = req.user.email;
+
+  // ─── Sprint 7: Refund policy consent required before payment ────────────
+  if (!refundPolicyAccepted) {
+    throw new ApiError(400, 'You must acknowledge the Refund Policy before proceeding to payment.');
+  }
 
   // Only customers can initiate Paystack payment — admins use markAsPaid instead.
   const shipment = await prisma.shipment.findFirst({
@@ -47,6 +69,9 @@ async function initPayment(req, res) {
       recipientCity: shipment.recipientCity,
     },
   });
+
+  // Sprint 7: Log REFUND_POLICY consent (fire-and-forget)
+  recordConsent(userId, 'REFUND_POLICY', req);
 
   return success(res, result, "Payment initialized");
 }

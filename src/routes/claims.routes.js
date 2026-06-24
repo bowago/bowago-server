@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const claimsController = require('../controllers/claims.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireClaimsAccess } = require('../middleware/auth');
 const { uploadDocument } = require('../config/cloudinary');
 
 /**
@@ -110,7 +110,7 @@ router.get('/:id', claimsController.getClaim);
  *       403:
  *         description: Admin access required
  */
-router.get('/', requireLogisticsOrAbove, claimsController.listClaims);
+router.get('/', requireClaimsAccess, claimsController.listClaims); // PRD: claims management capability
 
 /**
  * @swagger
@@ -143,6 +143,6 @@ router.get('/', requireLogisticsOrAbove, claimsController.listClaims);
  *       404:
  *         description: Claim not found
  */
-router.patch('/:id/review', requireLogisticsOrAbove, claimsController.reviewClaim);
+router.patch('/:id/review', requireClaimsAccess, claimsController.reviewClaim); // PRD: claims management capability
 
 module.exports = router;

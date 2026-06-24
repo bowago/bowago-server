@@ -4,6 +4,7 @@ const {
   authenticate,
   requireAdmin,
   requireLogisticsOrAbove,
+  requireSubRole,
 } = require("../middleware/auth");
 const {
   downloadShippingLabel,
@@ -538,7 +539,7 @@ router.post("/:id/cancel", shipmentController.cancelShipment);
  */
 router.patch(
   "/:id/status",
-  requireLogisticsOrAbove,
+  requireSubRole("ROLE_DISPATCHER"), // PRD: only DISPATCHER can update status
   shipmentController.updateShipmentStatus,
 );
 
@@ -598,7 +599,7 @@ router.patch(
  */
 router.patch(
   "/:id/assign",
-  requireLogisticsOrAbove,
+  requireSubRole("ROLE_DISPATCHER"), // PRD: DISPATCHER manages shipment assignments
   shipmentController.assignShipment,
 );
 

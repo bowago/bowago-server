@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/adminRole.controller');
-const { authenticate, requireSuperAdmin } = require('../middleware/auth');
+const { authenticate, requireSuperAdmin, requireAdmin } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -13,7 +13,10 @@ const { authenticate, requireSuperAdmin } = require('../middleware/auth');
  *     Only SUPER_ADMIN can access these endpoints.
  */
 
-router.use(authenticate, requireSuperAdmin);
+// All routes require authentication
+router.use(authenticate);
+// Read-only routes below accessible to any admin
+// Write routes (assign/update/revoke) are SUPER_ADMIN only
 
 /**
  * @swagger
@@ -42,7 +45,7 @@ router.use(authenticate, requireSuperAdmin);
  *                           label: { type: string, example: Manage Rates }
  *                           description: { type: string }
  */
-router.get('/capabilities', ctrl.listCapabilities);
+router.get('/capabilities', requireAdmin, ctrl.listCapabilities); // Any admin can read capabilities for UI
 
 /**
  * @swagger
@@ -61,7 +64,7 @@ router.get('/capabilities', ctrl.listCapabilities);
  *       200:
  *         description: Role assignments returned
  */
-router.get('/', ctrl.listAdminRoles);
+router.get('/', requireAdmin, ctrl.listAdminRoles); // Any admin can view role assignments
 
 /**
  * @swagger
@@ -80,7 +83,7 @@ router.get('/', ctrl.listAdminRoles);
  *       404:
  *         description: No custom role found for this user
  */
-router.get('/:userId', ctrl.getAdminRole);
+router.get('/:userId', requireAdmin, ctrl.getAdminRole); // Any admin can view a specific role
 
 /**
  * @swagger
@@ -145,7 +148,7 @@ router.get('/:userId', ctrl.getAdminRole);
  *       404:
  *         description: Target user not found
  */
-router.post('/', ctrl.assignCustomRole);
+router.post('/', requireSuperAdmin, ctrl.assignCustomRole); // SUPER_ADMIN only: assign custom role
 
 /**
  * @swagger
@@ -185,7 +188,7 @@ router.post('/', ctrl.assignCustomRole);
  *       404:
  *         description: Custom role not found
  */
-router.patch('/:userId', ctrl.updateCustomRole);
+router.patch('/:userId', requireSuperAdmin, ctrl.updateCustomRole); // SUPER_ADMIN only
 
 /**
  * @swagger
@@ -207,6 +210,6 @@ router.patch('/:userId', ctrl.updateCustomRole);
  *       403:
  *         description: Cannot revoke a SUPER_ADMIN
  */
-router.delete('/:userId', ctrl.revokeCustomRole);
+router.delete('/:userId', requireSuperAdmin, ctrl.revokeCustomRole); // SUPER_ADMIN only
 
 module.exports = router;

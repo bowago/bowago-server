@@ -1,7 +1,7 @@
 // ─── price-adjustment.routes.js ──────────────────────────────────────────────
 const paRouter = require('express').Router();
 const paController = require('../controllers/priceAdjustment.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSubRole } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -41,7 +41,7 @@ paRouter.use(authenticate);
  *       403:
  *         description: Admin access required
  */
-paRouter.post('/', requireLogisticsOrAbove, paController.createPriceAdjustment);
+paRouter.post('/', requireSubRole('ROLE_DISPATCHER'), paController.createPriceAdjustment); // PRD: DISPATCHER handles weight discrepancy adjustments
 
 /**
  * @swagger

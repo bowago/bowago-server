@@ -1,6 +1,7 @@
 const { prisma } = require("../config/db");
 const { calculateShippingCost } = require("../services/pricing.service");
 const { sendShipmentStatusEmail } = require("../config/email");
+const socketService = require("../services/socket.service");
 const { ApiError } = require("../utils/ApiError");
 const {
   success,
@@ -9,6 +10,21 @@ const {
   getPagination,
   buildMeta,
 } = require("../utils/helpers");
+
+// ─── Sprint 7: Consent helper ─────────────────────────────────────────────────
+async function recordConsent(userId, consentType, req) {
+  try {
+    await prisma.consentLog.create({
+      data: {
+        userId: userId || null,
+        consentType,
+        tcVersion: process.env.TC_VERSION || 'v1.0',
+        ipAddress: req.ip || req.headers['x-forwarded-for'] || null,
+        userAgent: req.headers['user-agent'] || null,
+      },
+    });
+  } catch (_) { /* non-blocking */ }
+}
 
 // ─── CREATE SHIPMENT ──────────────────────────────────────────────────────────
 async function createShipment(req, res) {
@@ -132,6 +148,34 @@ async function createShipment(req, res) {
     quotedPrice = quote.total;
   }
 
+  // Zone-aware estimated delivery using admin-configurable SLA table
+  // PRD Sprint 3: bookings after 2:00 PM → earliest pickup is next business day
+  let resolvedPickupDate = pickupDate ? new Date(pickupDate) : new Date();
+  let cutoffWarning = false;
+
+  const nowWAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' }));
+  const bookingHour = nowWAT.getHours();
+
+  if (bookingHour >= 14) {
+    // After 2PM WAT — advance pickup to next business day
+    cutoffWarning = true;
+    if (!pickupDate) {
+      // Auto-advance to next business day
+      const next = new Date(nowWAT);
+      next.setDate(next.getDate() + 1);
+      while (next.getDay() === 0 || next.getDay() === 6) {
+        next.setDate(next.getDate() + 1);
+      }
+      resolvedPickupDate = next;
+    }
+  }
+
+  const slaResult = await getEstimatedDelivery(
+    quote.zone,
+    resolvedServiceType,
+    resolvedPickupDate
+  );
+
   const shipment = await prisma.shipment.create({
     data: {
       trackingNumber: generateTrackingNumber(),
@@ -164,7 +208,8 @@ async function createShipment(req, res) {
       requiresInsurance: !!requiresInsurance,
       insuranceValue: resolvedInsuranceValue,
       notes,
-      pickupDate: pickupDate ? new Date(pickupDate) : null,
+      pickupDate: resolvedPickupDate,
+      estimatedDelivery: slaResult.estimatedDelivery,
       trackingHistory: {
         create: {
           status: "PENDING",
@@ -188,7 +233,12 @@ async function createShipment(req, res) {
     });
   }
 
-  return created(res, { shipment, quote }, "Shipment created successfully");
+  return created(res, { shipment, quote, cutoffWarning }, cutoffWarning
+    ? 'Shipment created. Booking after 2PM — earliest pickup is next business day.'
+    : 'Shipment created successfully');
+
+  // Sprint 7: Record SHIPPING_RULES consent (fire-and-forget after response)
+  recordConsent(req.user.id, 'SHIPPING_RULES', req);
 }
 
 // ─── LIST SHIPMENTS (Customer) ────────────────────────────────────────────────
@@ -318,14 +368,23 @@ async function trackShipment(req, res) {
   const viewerId = req.user?.id;
   const isOwner = viewerId && viewerId === shipment.customerId;
 
+  // PRD Sprint 4: "123 Main Street, Lagos, Lagos State, NG" → "Lagos, Lagos State, NG"
+  // Guests see city + state only; map marker still shows exact location.
+  // Logged-in owners see full street address.
   const masked = {
     ...shipment,
-    senderAddress: isOwner ? shipment.senderAddress : null,
-    recipientAddress: isOwner ? shipment.recipientAddress : null,
-    // Mask recipient full name for non-owners (show first name + initial only)
+    senderAddress: isOwner
+      ? shipment.senderAddress
+      : [shipment.senderCity, shipment.senderState, 'NG'].filter(Boolean).join(', '),
+    recipientAddress: isOwner
+      ? shipment.recipientAddress
+      : [shipment.recipientCity, shipment.recipientState, 'NG'].filter(Boolean).join(', '),
     recipientName: isOwner
       ? shipment.recipientName
-      : shipment.recipientName?.split(" ")[0] + " ***",
+      : (shipment.recipientName?.split(' ')[0] ?? '') + ' ***',
+    senderName: isOwner
+      ? shipment.senderName
+      : (shipment.senderName?.split(' ')[0] ?? '') + ' ***',
   };
 
   // Remove internal fields from response
@@ -395,7 +454,7 @@ async function updateShipmentStatus(req, res) {
   }
 
   // Create in-app notification
-  await prisma.notification.create({
+  const notification = await prisma.notification.create({
     data: {
       userId: shipment.customerId,
       type: "SHIPMENT_UPDATE",
@@ -406,6 +465,16 @@ async function updateShipmentStatus(req, res) {
       data: { shipmentId: id, status, trackingNumber: shipment.trackingNumber },
     },
   });
+
+  // ─── Sprint 4: Real-time push via WebSocket ──────────────────────────────
+  // Fetch updated timeline so the tracking room gets the full event list
+  const timeline = await prisma.trackingEvent.findMany({
+    where: { shipmentId: id },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+  socketService.emitShipmentUpdate(updated, timeline);
+  socketService.emitNotification(shipment.customerId, notification);
 
   return success(res, { shipment: updated }, "Status updated");
 }

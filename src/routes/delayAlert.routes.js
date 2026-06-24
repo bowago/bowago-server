@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const delayAlertController = require('../controllers/delayAlert.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireSubRole } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -9,7 +9,7 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  *   description: "Sprint 5 - Proactive batch delay notifications sent to multiple customers at once"
  */
 
-router.use(authenticate, requireLogisticsOrAbove);
+router.use(authenticate, requireSubRole("ROLE_DISPATCHER")); // PRD: DISPATCHER manages shipment operations
 
 /**
  * @swagger

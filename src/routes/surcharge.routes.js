@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const surchargeController = require('../controllers/surcharge.controller');
-const { authenticate, requireLogisticsOrAbove, requireSuperAdmin } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireSuperAdmin, requireSurchargeManagement } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -118,7 +118,7 @@ router.get('/', surchargeController.listSurcharges);
 router.post('/preview', surchargeController.previewSurcharges);
 
 // ─── Admin routes ─────────────────────────────────────────────────────────────
-router.use(authenticate, requireLogisticsOrAbove);
+router.use(authenticate, requireSurchargeManagement); // PRD: canManageSurcharges capability
 
 /**
  * @swagger

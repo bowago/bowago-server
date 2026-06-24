@@ -1,6 +1,6 @@
-const { prisma } = require('../config/db');
-const { ApiError } = require('../utils/ApiError');
-const { success, getPagination, buildMeta } = require('../utils/helpers');
+const { prisma } = require("../config/db");
+const { ApiError } = require("../utils/ApiError");
+const { success, getPagination, buildMeta } = require("../utils/helpers");
 
 async function listNotifications(req, res) {
   const { page, limit, skip } = getPagination(req.query);
@@ -8,16 +8,20 @@ async function listNotifications(req, res) {
 
   const where = {
     userId: req.user.id,
-    ...(unreadOnly === 'true' && { isRead: false }),
+    ...(unreadOnly === "true" && { isRead: false }),
   };
 
   const [notifications, total, unreadCount] = await Promise.all([
     prisma.notification.findMany({
-      where, skip, take: limit,
-      orderBy: { createdAt: 'desc' },
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
     }),
     prisma.notification.count({ where }),
-    prisma.notification.count({ where: { userId: req.user.id, isRead: false } }),
+    prisma.notification.count({
+      where: { userId: req.user.id, isRead: false },
+    }),
   ]);
 
   return res.json({
@@ -30,25 +34,25 @@ async function listNotifications(req, res) {
 async function markRead(req, res) {
   const { id } = req.params;
 
-  if (id === 'all') {
+  if (id === "all") {
     await prisma.notification.updateMany({
       where: { userId: req.user.id, isRead: false },
       data: { isRead: true, readAt: new Date() },
     });
-    return success(res, {}, 'All notifications marked as read');
+    return success(res, {}, "All notifications marked as read");
   }
 
   const notif = await prisma.notification.findFirst({
     where: { id, userId: req.user.id },
   });
-  if (!notif) throw new ApiError(404, 'Notification not found');
+  if (!notif) throw new ApiError(404, "Notification not found");
 
   await prisma.notification.update({
     where: { id },
     data: { isRead: true, readAt: new Date() },
   });
 
-  return success(res, {}, 'Notification marked as read');
+  return success(res, {}, "Notification marked as read");
 }
 
 async function deleteNotification(req, res) {
@@ -58,7 +62,25 @@ async function deleteNotification(req, res) {
     where: { id, userId: req.user.id },
   });
 
-  return success(res, {}, 'Notification deleted');
+  return success(res, {}, "Notification deleted");
+}
+
+// ─── DELETE /notifications/bulk ───────────────────────────────────────────────
+// Delete multiple notifications by id array, or all if ids not provided
+async function bulkDeleteNotifications(req, res) {
+  const { ids } = req.body; // array of ids, or omit to delete all
+
+  if (ids && !Array.isArray(ids)) {
+    throw new ApiError(400, '"ids" must be an array of notification IDs');
+  }
+
+  const where = ids && ids.length > 0
+    ? { userId: req.user.id, id: { in: ids } }
+    : { userId: req.user.id };
+
+  const result = await prisma.notification.deleteMany({ where });
+
+  return success(res, { deleted: result.count }, `${result.count} notification(s) deleted`);
 }
 
 // Admin: broadcast notification
@@ -73,19 +95,23 @@ async function broadcastNotification(req, res) {
       where: { isActive: true },
       select: { id: true },
     });
-    targets = users.map(u => u.id);
+    targets = users.map((u) => u.id);
   }
 
   await prisma.notification.createMany({
-    data: targets.map(userId => ({
+    data: targets.map((userId) => ({
       userId,
-      type: type || 'SYSTEM',
+      type: type || "SYSTEM",
       title,
       body,
     })),
   });
 
-  return success(res, { sent: targets.length }, `Notification sent to ${targets.length} users`);
+  return success(
+    res,
+    { sent: targets.length },
+    `Notification sent to ${targets.length} users`,
+  );
 }
 
 // Update FCM token
@@ -97,13 +123,35 @@ async function updateFcmToken(req, res) {
     data: { fcmToken },
   });
 
-  return success(res, {}, 'FCM token updated');
+  return success(res, {}, "FCM token updated");
+}
+
+// ─── GET /notifications/unread-count ─────────────────────────────────────────
+async function getUnreadCount(req, res) {
+  const userId = req.user.id;
+  const count = await prisma.notification.count({
+    where: { userId, isRead: false },
+  });
+  return success(res, { count });
+}
+
+// ─── PATCH /notifications/mark-all-read ──────────────────────────────────────
+async function markAllRead(req, res) {
+  const userId = req.user.id;
+  await prisma.notification.updateMany({
+    where: { userId, isRead: false },
+    data: { isRead: true, readAt: new Date() },
+  });
+  return success(res, {}, "All notifications marked as read");
 }
 
 module.exports = {
   listNotifications,
   markRead,
   deleteNotification,
+  bulkDeleteNotifications,
   broadcastNotification,
   updateFcmToken,
+  getUnreadCount,
+  markAllRead,
 };

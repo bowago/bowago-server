@@ -8,28 +8,29 @@ const {
 } = require("../utils/helpers");
 
 // Auto-assign logic based on category (Sprint 6)
+// PRD: PAYMENT/PRICING → ROLE_FINANCE, TRACKING/DELIVERY → ROLE_DISPATCHER, others → ROLE_AGENT
 async function autoAssignTicket(category) {
   const categoryAgentMap = {
-    PAYMENT: "LOGISTICS_MANAGER",
-    PRICING_DISPUTE: "LOGISTICS_MANAGER",
-    TRACKING: "LOGISTICS_MANAGER",
-    DAMAGED_GOODS: "LOGISTICS_MANAGER",
-    DELIVERY_ISSUE: "LOGISTICS_MANAGER",
-    ACCOUNT: "SUPER_ADMIN",
-    OTHER: "LOGISTICS_MANAGER",
+    PAYMENT:         'ROLE_FINANCE',
+    PRICING_DISPUTE: 'ROLE_FINANCE',
+    TRACKING:        'ROLE_DISPATCHER',
+    DAMAGED_GOODS:   'ROLE_AGENT',
+    DELIVERY_ISSUE:  'ROLE_DISPATCHER',
+    ACCOUNT:         'ROLE_AGENT',
+    OTHER:           'ROLE_AGENT',
   };
 
-  const requiredSubRole = categoryAgentMap[category] || "LOGISTICS_MANAGER";
+  const requiredSubRole = categoryAgentMap[category] || 'ROLE_AGENT';
 
   const agent = await prisma.user.findFirst({
     where: {
-      role: "ADMIN",
+      role: 'ADMIN',
       adminSubRole: requiredSubRole,
       isActive: true,
     },
     orderBy: {
       // Assign to agent with fewest open tickets
-      assignedTickets: { _count: "asc" },
+      assignedTickets: { _count: 'asc' },
     },
   });
 
@@ -349,6 +350,193 @@ async function deleteCannedResponse(req, res) {
   return success(res, {}, "Canned response deleted");
 }
 
+// ─── Sprint 6: Agent KPI Dashboard ───────────────────────────────────────────
+// Returns per-agent metrics: response time, resolution time, CSAT, volume, re-open rate.
+// Also returns team-level metrics for team leads.
+async function getAgentKpi(req, res) {
+  const { from, to, agentId } = req.query;
+
+  const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days
+  const toDate   = to   ? new Date(to)   : new Date();
+
+  const ticketWhere = {
+    createdAt: { gte: fromDate, lte: toDate },
+    ...(agentId && { assignedToId: agentId }),
+    assignedToId: { not: null },
+  };
+
+  // Fetch all tickets in window with their messages
+  const tickets = await prisma.supportTicket.findMany({
+    where: ticketWhere,
+    include: {
+      messages: { orderBy: { createdAt: 'asc' }, take: 1 },
+      assignedTo: { select: { id: true, firstName: true, lastName: true } },
+    },
+  });
+
+  // Group by agent
+  const agentMap = {};
+  for (const ticket of tickets) {
+    const aid = ticket.assignedToId;
+    if (!aid) continue;
+    if (!agentMap[aid]) {
+      agentMap[aid] = {
+        agentId: aid,
+        agentName: ticket.assignedTo
+          ? `${ticket.assignedTo.firstName} ${ticket.assignedTo.lastName}`
+          : 'Unknown',
+        totalTickets:     0,
+        resolved:         0,
+        firstResponseMs:  [],
+        resolutionMs:     [],
+        csatScores:       [],
+        reopened:         0,
+        escalated:        0,
+      };
+    }
+
+    const a = agentMap[aid];
+    a.totalTickets++;
+
+    if (['RESOLVED', 'CLOSED'].includes(ticket.status)) a.resolved++;
+    if (ticket.status === 'ESCALATED') a.escalated++;
+
+    // First response time (ticket created → first agent message)
+    const firstMsg = ticket.messages[0];
+    if (firstMsg) {
+      a.firstResponseMs.push(firstMsg.createdAt - ticket.createdAt);
+    }
+
+    // Resolution time (ticket created → resolvedAt, if set)
+    if (ticket.resolvedAt) {
+      a.resolutionMs.push(ticket.resolvedAt - ticket.createdAt);
+    }
+
+    // CSAT (if present)
+    if (ticket.csatScore != null) a.csatScores.push(ticket.csatScore);
+  }
+
+  // Compute averages
+  const avg = (arr) => arr.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : null;
+  const msToMin = (ms) => ms != null ? Math.round(ms / 60000) : null;
+
+  const kpi = Object.values(agentMap).map((a) => ({
+    agentId:                   a.agentId,
+    agentName:                 a.agentName,
+    totalTickets:              a.totalTickets,
+    resolvedTickets:           a.resolved,
+    escalatedTickets:          a.escalated,
+    resolutionRate:            a.totalTickets > 0
+      ? Math.round((a.resolved / a.totalTickets) * 100)
+      : 0,
+    avgFirstResponseMinutes:   msToMin(avg(a.firstResponseMs)),
+    avgResolutionMinutes:      msToMin(avg(a.resolutionMs)),
+    avgCsatScore:              a.csatScores.length
+      ? Math.round((avg(a.csatScores) / 1) * 10) / 10
+      : null,
+    csatResponses:             a.csatScores.length,
+  }));
+
+  // Team totals
+  const team = {
+    totalTickets:  tickets.length,
+    totalResolved: tickets.filter(t => ['RESOLVED','CLOSED'].includes(t.status)).length,
+    totalEscalated: tickets.filter(t => t.status === 'ESCALATED').length,
+    period: { from: fromDate, to: toDate },
+  };
+
+  return success(res, { kpi, team }, 'Agent KPI report');
+}
+
+// ─── Sprint 6: Ticket Escalation Job ─────────────────────────────────────────
+// PRD: Tickets unresolved > 4 hours → auto-escalate with alert to team lead.
+// Call this function from a cron or setInterval in server.js.
+async function runEscalationJob() {
+  const FOUR_HOURS_AGO = new Date(Date.now() - 4 * 60 * 60 * 1000);
+
+  const stale = await prisma.supportTicket.findMany({
+    where: {
+      status: 'IN_PROGRESS',
+      createdAt: { lt: FOUR_HOURS_AGO },
+      // Only escalate once — skip already-escalated
+    },
+    include: {
+      customer:   { select: { firstName: true, lastName: true, email: true } },
+      assignedTo: { select: { firstName: true, lastName: true } },
+    },
+  });
+
+  if (stale.length === 0) return { escalated: 0 };
+
+  // Find a SUPER_ADMIN / LOGISTICS_MANAGER to notify
+  const teamLead = await prisma.user.findFirst({
+    where: {
+      role: 'ADMIN',
+      adminSubRole: { in: ['SUPER_ADMIN', 'LOGISTICS_MANAGER'] },
+      isActive: true,
+    },
+  });
+
+  let escalated = 0;
+
+  for (const ticket of stale) {
+    try {
+      await prisma.supportTicket.update({
+        where: { id: ticket.id },
+        data: { status: 'ESCALATED' },
+      });
+
+      // Notify team lead in-app
+      if (teamLead) {
+        await prisma.notification.create({
+          data: {
+            userId: teamLead.id,
+            type:   'SYSTEM',
+            title:  `🚨 Ticket Escalated: ${ticket.ticketNumber}`,
+            body:   `Ticket "${ticket.subject}" has been unresolved for over 4 hours. Assigned to: ${ticket.assignedTo ? `${ticket.assignedTo.firstName} ${ticket.assignedTo.lastName}` : 'Unassigned'}.`,
+            data:   { ticketId: ticket.id, ticketNumber: ticket.ticketNumber },
+          },
+        });
+      }
+
+      escalated++;
+    } catch (err) {
+      console.error(`Escalation failed for ticket ${ticket.id}:`, err.message);
+    }
+  }
+
+  return { escalated };
+}
+
+// ─── Sprint 6: Customer CSAT submission ──────────────────────────────────────
+// Customer rates the resolved ticket (1–5). Can only submit once.
+async function submitCsat(req, res) {
+  const { id } = req.params;
+  const { score } = req.body;
+
+  if (!score || score < 1 || score > 5) {
+    throw new ApiError(400, 'score must be an integer between 1 and 5');
+  }
+
+  const ticket = await prisma.supportTicket.findFirst({
+    where: { id, customerId: req.user.id },
+  });
+  if (!ticket) throw new ApiError(404, 'Ticket not found');
+  if (!['RESOLVED', 'CLOSED'].includes(ticket.status)) {
+    throw new ApiError(400, 'CSAT can only be submitted for resolved tickets');
+  }
+  if (ticket.csatScore != null) {
+    throw new ApiError(409, 'You have already submitted a rating for this ticket');
+  }
+
+  await prisma.supportTicket.update({
+    where: { id },
+    data: { csatScore: parseInt(score, 10) },
+  });
+
+  return success(res, {}, 'Thank you for your feedback!');
+}
+
 module.exports = {
   createTicket,
   myTickets,
@@ -360,4 +548,7 @@ module.exports = {
   createCannedResponse,
   updateCannedResponse,
   deleteCannedResponse,
+  getAgentKpi,
+  runEscalationJob,
+  submitCsat,
 };

@@ -658,6 +658,7 @@ model SupportTicket {
   shipmentId   String?
   resolvedAt   DateTime?
   closedAt     DateTime?
+  csatScore    Int?            // 1–5 customer satisfaction rating (Sprint 6 KPI)
 
   customer     User            @relation("TicketCustomer", fields: [customerId], references: [id])
   assignedTo   User?           @relation("TicketAgent", fields: [assignedToId], references: [id])
@@ -714,6 +715,25 @@ model FaqItem {
   updatedAt DateTime    @updatedAt
 
   @@map("faq_items")
+}
+
+
+// ─── DELIVERY SLA ─────────────────────────────────────────────────────────────
+// Admin-configurable delivery days per zone × service type.
+// Zone 1 = same state (closest), Zone 4 = furthest cross-region.
+model DeliverySLA {
+  id          String   @id @default(uuid())
+  zone        Int
+  serviceType String   // EXPRESS | STANDARD | ECONOMY
+  minDays     Int
+  maxDays     Int
+  label       String?  // auto-generated: "1-3 business days"
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([zone, serviceType])
+  @@map("delivery_sla")
 }
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
@@ -995,3 +1015,37 @@ model FailedWebhook {
         @@index([event])
       }
 
+
+// ─── LOGIN LOCKOUT (Sprint 2 gap fix) ────────────────────────────────────────
+// Track failed login attempts per email for 15-minute lockout after 5 failures.
+model LoginAttempt {
+  id            String   @id @default(uuid())
+  email         String
+  failedCount   Int      @default(0)
+  lockedUntil   DateTime?
+  lastAttemptAt DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([email])
+  @@map("login_attempts")
+}
+
+// ─── ORG INVITE (Sprint 8) ────────────────────────────────────────────────────
+// Master user invites team members via email. Invite expires in 7 days.
+model OrgInvite {
+  id          String    @id @default(uuid())
+  email       String
+  role        String    @default("ROLE_DISPATCHER") // AdminSubRole string
+  invitedBy   String    // User.id of master who sent invite
+  token       String    @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  status      String    @default("PENDING") // PENDING | ACCEPTED | EXPIRED | CANCELLED
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([email])
+  @@index([status])
+  @@map("org_invites")
+}

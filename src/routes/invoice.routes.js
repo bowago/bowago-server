@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const invoiceController = require('../controllers/invoice.controller');
-const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -119,7 +119,7 @@ router.get('/my', invoiceController.myInvoices);
 
 router.get('/my-summary', authenticate, invoiceController.myInvoiceSummary);
 
-router.get('/financial-overview', requireLogisticsOrAbove, invoiceController.financialOverview);
+router.get('/financial-overview', requireInvoiceAccess, invoiceController.financialOverview); // PRD: ROLE_FINANCE / canManageInvoices
 
 
 /**
@@ -157,7 +157,7 @@ router.get('/financial-overview', requireLogisticsOrAbove, invoiceController.fin
  *       403:
  *         description: Admin access required
  */
-router.get('/admin', requireLogisticsOrAbove, invoiceController.adminListInvoices);
+router.get('/admin', requireInvoiceAccess, invoiceController.adminListInvoices); // PRD: ROLE_FINANCE / canManageInvoices
 
 /**
  * @swagger

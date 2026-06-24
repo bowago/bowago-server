@@ -2,13 +2,37 @@ const { prisma } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
 const { success, created, getPagination, buildMeta } = require('../utils/helpers');
 
-// All capabilities the SUPER_ADMIN can toggle
+// All capabilities the SUPER_ADMIN can toggle on a ROLE_ADMIN user
 const ALL_CAPABILITIES = [
-  'canManageRates', 'canManageUsers', 'canManageShipments',
-  'canViewAnalytics', 'canManageTickets', 'canManageInvoices',
-  'canManageSurcharges', 'canManagePromos', 'canManageClaims',
-  'canBulkNotify', 'canViewAuditLogs', 'canManageOrganization',
+  'canManageRates',
+  'canManageUsers',
+  'canManageShipments',
+  'canViewAnalytics',
+  'canManageTickets',
+  'canManageInvoices',
+  'canManageSurcharges',
+  'canManagePromos',
+  'canManageClaims',
+  'canBulkNotify',
+  'canViewAuditLogs',
+  'canManageOrganization',
 ];
+
+// Human-readable metadata for each capability — used in the assign-role UI
+const capabilityDescriptions = {
+  canManageRates:        'Create, update, rollback, and delete price bands and contract rates',
+  canManageUsers:        'View, activate/deactivate user accounts; assign and revoke admin roles',
+  canManageShipments:    'Update shipment status, assign shipments to dispatchers, view all shipments',
+  canViewAnalytics:      'Access revenue reports, agent KPI dashboards, and business analytics',
+  canManageTickets:      'Read, reply to, escalate, reassign, and close customer support tickets',
+  canManageInvoices:     'View all invoices, download PDFs, process refunds, mark shipments paid',
+  canManageSurcharges:   'Create, update, and delete fuel and remote-area surcharge configurations',
+  canManagePromos:       'Create, activate, pause, and delete promo codes and promotional rates',
+  canManageClaims:       'Review, approve, reject, and process payouts for insurance claims',
+  canBulkNotify:         'Send bulk delay alerts and broadcast notifications to all customers',
+  canViewAuditLogs:      'Access the immutable pricing audit trail and system activity logs',
+  canManageOrganization: 'Invite team members, assign company roles, manage org structure',
+};
 
 // ─── Create or assign a custom admin role to a staff member ──────────────────
 // SUPER_ADMIN-only. Sets the adminSubRole to ROLE_ADMIN and defines their capabilities.
@@ -170,6 +194,8 @@ async function getAdminRole(req, res) {
 }
 
 // ─── List all available capabilities ─────────────────────────────────────────
+// Returns the full list with labels and descriptions for the SUPER_ADMIN
+// role assignment UI. Accessible to any ADMIN user.
 async function listCapabilities(req, res) {
   return success(res, {
     capabilities: ALL_CAPABILITIES.map(cap => ({
@@ -177,23 +203,9 @@ async function listCapabilities(req, res) {
       label:       cap.replace(/^can/, '').replace(/([A-Z])/g, ' $1').trim(),
       description: capabilityDescriptions[cap] || cap,
     })),
+    totalCapabilities: ALL_CAPABILITIES.length,
   });
 }
-
-const capabilityDescriptions = {
-  canManageRates:        'Create, update, and delete price bands, contract rates, and promo rates',
-  canManageUsers:        'View, activate/deactivate user accounts; assign admin roles',
-  canManageShipments:    'Update shipment status, assign shipments, view all shipments',
-  canViewAnalytics:      'Access reporting, KPI dashboards, and revenue analytics',
-  canManageTickets:      'Read, reply to, escalate, and close support tickets',
-  canManageInvoices:     'View and download invoices; process refunds',
-  canManageSurcharges:   'Create and update surcharge configurations',
-  canManagePromos:       'Create, activate/deactivate promo codes and promo rates',
-  canManageClaims:       'Review, approve, and reject insurance claims',
-  canBulkNotify:         'Send bulk delay alerts and notifications to customers',
-  canViewAuditLogs:      'Access pricing audit trail and activity logs',
-  canManageOrganization: 'Manage organization members, invite team members, assign company roles',
-};
 
 module.exports = {
   assignCustomRole, updateCustomRole, revokeCustomRole,
