@@ -44,3 +44,8 @@ prisma/migrations/
 /src/generated/prisma
 
 scripts/*  
+node_modules/
+.env
+.env.local
+dist/
+prisma/pricing_data.json

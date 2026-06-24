@@ -64,21 +64,35 @@ async function sendShipmentStatusEmail(email, firstName, shipment) {
   };
 
   const label = statusLabels[shipment.status] || shipment.status;
+  const frontendUrl = process.env.FRONTEND_URL || 'https://bowago.vercel.app';
+  const trackingUrl = `${frontendUrl}/track?q=${shipment.trackingNumber}`;
 
   return sendEmail({
     to: email,
     subject: `Shipment ${shipment.trackingNumber} – ${label}`,
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px;">
-        <h1 style="color: #E85D04;">BowaGO</h1>
-        <p>Hi ${firstName},</p>
-        <p>Your shipment status has been updated:</p>
-        <div style="background: #f4f4f4; border-left: 4px solid #E85D04; padding: 16px; border-radius: 4px;">
-          <strong>Tracking #:</strong> ${shipment.trackingNumber}<br/>
-          <strong>Status:</strong> ${label}<br/>
-          <strong>To:</strong> ${shipment.recipientCity}, ${shipment.recipientState}
+      <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #ffffff;">
+        <div style="margin-bottom: 24px;">
+          <span style="font-size: 22px; font-weight: 900; color: #CC0000; letter-spacing: -0.5px;">Bowa<span style="color: #111;">GO</span></span>
         </div>
-        <p style="margin-top: 20px;">Track your shipment on the BowaGO app.</p>
+        <p style="color: #333; margin: 0 0 8px;">Hi ${firstName},</p>
+        <p style="color: #333; margin: 0 0 20px;">Your shipment status has been updated:</p>
+        <div style="background: #f8f8f8; border-left: 4px solid #CC0000; padding: 16px; border-radius: 6px; margin-bottom: 24px;">
+          <div style="margin-bottom: 6px;"><strong style="color: #111;">Tracking #:</strong> <span style="color: #CC0000; font-weight: 700;">${shipment.trackingNumber}</span></div>
+          <div style="margin-bottom: 6px;"><strong style="color: #111;">Status:</strong> ${label}</div>
+          <div><strong style="color: #111;">Destination:</strong> ${shipment.recipientCity}, ${shipment.recipientState}</div>
+        </div>
+        <a href="${trackingUrl}"
+           style="display: inline-block; background: #CC0000; color: #ffffff; text-decoration: none;
+                  font-weight: 700; font-size: 14px; padding: 12px 28px; border-radius: 8px; margin-bottom: 24px;">
+          Track Your Shipment →
+        </a>
+        <p style="color: #999; font-size: 12px; margin: 0;">
+          If the button doesn't work, copy this link:<br/>
+          <a href="${trackingUrl}" style="color: #CC0000;">${trackingUrl}</a>
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+        <p style="color: #bbb; font-size: 11px; margin: 0;">BowaGO Logistics · support@bowago.ng</p>
       </div>
     `,
   });

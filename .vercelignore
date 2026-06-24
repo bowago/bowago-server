@@ -1,4 +1,20 @@
 node_modules
 .env
 prisma/migrations
-*.xlsx
+\*.xlsx
+
+# Exclude dev tools
+
+nodemon.json
+.env.local
+.env.development
+
+# Exclude large data files not needed at runtime
+
+prisma/pricing_data.json
+scripts/
+
+# Exclude test files
+
+**/\*.test.js
+**/\*.spec.js

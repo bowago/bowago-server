@@ -377,11 +377,12 @@ async function deletePriceBand(req, res) {
 // ─── ZONE MATRIX ──────────────────────────────────────────────────────────────
 async function getZoneMatrix(req, res) {
   const { page, limit, skip } = getPagination(req.query);
-  const { fromCity, toCity, isActive } = req.query;
+  const { fromCity, toCity, isActive, exact } = req.query;
+  const matchMode = exact === 'true' ? 'equals' : 'contains';
 
   const where = {
-    ...(fromCity && { fromCity: { name: { contains: fromCity, mode: 'insensitive' } } }),
-    ...(toCity   && { toCity:   { name: { contains: toCity,   mode: 'insensitive' } } }),
+    ...(fromCity && { fromCity: { name: { [matchMode]: fromCity, mode: 'insensitive' } } }),
+    ...(toCity   && { toCity:   { name: { [matchMode]: toCity,   mode: 'insensitive' } } }),
     ...(isActive !== undefined && { isActive: isActive === 'true' }),
   };
 
