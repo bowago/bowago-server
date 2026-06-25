@@ -73,28 +73,43 @@ async function updateProfile(req, res) {
 // ─── UPDATE COMPANY INFO ────────────────────────────────────────────────────
 async function updateCompanyInfo(req, res) {
   const {
-    companyName, industry, companyEmail, companyPhone, companyWebsite,
-    streetAddress, city, state, country, zipCode,
+    companyName,
+    industry,
+    companyEmail,
+    companyPhone,
+    companyWebsite,
+    streetAddress,
+    city,
+    state,
+    country,
+    zipCode,
   } = req.body;
 
   const user = await prisma.user.update({
     where: { id: req.user.id },
     data: {
-      ...(companyName    !== undefined && { companyName }),
-      ...(industry       !== undefined && { industry }),
-      ...(companyEmail   !== undefined && { companyEmail }),
-      ...(companyPhone   !== undefined && { companyPhone }),
+      ...(companyName !== undefined && { companyName }),
+      ...(industry !== undefined && { industry }),
+      ...(companyEmail !== undefined && { companyEmail }),
+      ...(companyPhone !== undefined && { companyPhone }),
       ...(companyWebsite !== undefined && { companyWebsite }),
-      ...(streetAddress  !== undefined && { companyStreet: streetAddress }),
-      ...(city           !== undefined && { companyCity: city }),
-      ...(state          !== undefined && { companyState: state }),
-      ...(country        !== undefined && { companyCountry: country }),
-      ...(zipCode        !== undefined && { companyZip: zipCode }),
+      ...(streetAddress !== undefined && { companyStreet: streetAddress }),
+      ...(city !== undefined && { companyCity: city }),
+      ...(state !== undefined && { companyState: state }),
+      ...(country !== undefined && { companyCountry: country }),
+      ...(zipCode !== undefined && { companyZip: zipCode }),
     },
     select: {
-      companyName: true, industry: true, companyEmail: true, companyPhone: true,
-      companyWebsite: true, companyStreet: true, companyCity: true,
-      companyState: true, companyCountry: true, companyZip: true,
+      companyName: true,
+      industry: true,
+      companyEmail: true,
+      companyPhone: true,
+      companyWebsite: true,
+      companyStreet: true,
+      companyCity: true,
+      companyState: true,
+      companyCountry: true,
+      companyZip: true,
     },
   });
 
@@ -204,10 +219,12 @@ async function deleteAddress(req, res) {
 // ─── ADMIN: LIST USERS ────────────────────────────────────────────────────────
 async function listUsers(req, res) {
   const { page, limit, skip } = getPagination(req.query);
-  const { role, search, isActive } = req.query;
+  const { role, search, isActive, adminSubRole } = req.query;
 
   const where = {
     ...(role && { role }),
+    // Sprint 8: filter by adminSubRole to fetch dispatchers for assignment dropdown
+    ...(adminSubRole && { adminSubRole }),
     ...(isActive !== undefined && { isActive: isActive === "true" }),
     ...(search && {
       OR: [
@@ -427,7 +444,10 @@ async function deleteSavedCard(req, res) {
       orderBy: { createdAt: "desc" },
     });
     if (next) {
-      await prisma.savedCard.update({ where: { id: next.id }, data: { isDefault: true } });
+      await prisma.savedCard.update({
+        where: { id: next.id },
+        data: { isDefault: true },
+      });
     }
   }
 
@@ -456,20 +476,22 @@ module.exports = {
 // ─── CUSTOMER: DELETE OWN ACCOUNT ──────────────────────────────────────────
 async function deleteOwnAccount(req, res) {
   const { password } = req.body;
-  if (!password) throw new ApiError(400, 'Password is required to delete your account');
+  if (!password)
+    throw new ApiError(400, "Password is required to delete your account");
 
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-  if (!user) throw new ApiError(404, 'User not found');
+  if (!user) throw new ApiError(404, "User not found");
 
   if (user.passwordHash) {
-    const bcrypt = require('bcryptjs');
+    const bcrypt = require("bcryptjs");
     const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) throw new ApiError(401, 'Incorrect password. Account not deleted.');
+    if (!valid)
+      throw new ApiError(401, "Incorrect password. Account not deleted.");
   }
 
   // Soft-delete via deactivation to preserve shipment/invoice history,
   // OR hard-delete if you prefer. Hard-delete cascades via Prisma schema.
   await prisma.user.delete({ where: { id: req.user.id } });
 
-  return success(res, {}, 'Your account has been permanently deleted.');
+  return success(res, {}, "Your account has been permanently deleted.");
 }

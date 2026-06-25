@@ -1,3 +1,4 @@
+const bcrypt = require('bcryptjs');
 const { prisma } = require('../config/db');
 const { sendOtpEmail } = require('../config/email');
 const { sendOtpSms } = require('./sms.service');
@@ -6,6 +7,7 @@ const { ApiError } = require('../utils/ApiError');
 
 const OTP_EXPIRES_MINUTES = parseInt(process.env.OTP_EXPIRES_MINUTES) || 10;
 const MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS) || 3;
+const BCRYPT_ROUNDS = 8; // fast enough for OTPs, strong enough for storage
 
 /**
  * @param {string} userId
@@ -17,23 +19,24 @@ async function sendOtp(userId, destination, type, channel = 'EMAIL') {
   // Invalidate any existing unused OTPs of same type
   await prisma.otpCode.updateMany({
     where: { userId, type, usedAt: null },
-    data: { usedAt: new Date() }, // Mark as used/expired
+    data: { usedAt: new Date() },
   });
 
   const code = generateOtp(6);
+  const hashedCode = await bcrypt.hash(code, BCRYPT_ROUNDS); // Gap 4: store hash, never plaintext
   const expiresAt = new Date(Date.now() + OTP_EXPIRES_MINUTES * 60 * 1000);
 
   await prisma.otpCode.create({
-    data: { userId, code, type, expiresAt },
+    data: { userId, code: hashedCode, type, expiresAt },
   });
 
   if (channel === 'SMS') {
-    await sendOtpSms(destination, code);
+    await sendOtpSms(destination, code); // send plaintext code to user
   } else {
     await sendOtpEmail(destination, code, type);
   }
 
-  return code;
+  return code; // only returned internally (for tests); never persisted in plain form
 }
 
 async function verifyOtp(userId, code, type) {
@@ -54,17 +57,19 @@ async function verifyOtp(userId, code, type) {
     throw new ApiError(400, 'Too many failed attempts. Please request a new code.');
   }
 
-  // Increment attempts for this try
+  // Increment attempts before comparing — prevents brute-force even on slow bcrypt
   await prisma.otpCode.update({
     where: { id: otp.id },
     data: { attempts: { increment: 1 } },
   });
 
-  if (otp.code !== code) {
+  // Gap 4: bcrypt compare instead of plaintext equality
+  const isMatch = await bcrypt.compare(String(code), otp.code);
+  if (!isMatch) {
     throw new ApiError(400, 'Invalid verification code');
   }
 
-  // Mark as used
+  // Mark as used — deleted by nightly cleanup or next sendOtp call for same type
   await prisma.otpCode.update({
     where: { id: otp.id },
     data: { usedAt: new Date() },

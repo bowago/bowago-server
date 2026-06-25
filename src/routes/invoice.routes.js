@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const invoiceController = require('../controllers/invoice.controller');
-const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess, requireRecentMFA } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -9,7 +9,10 @@ const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess } = require(
  *   description: "Sprint 3 - Invoice management, PDF downloads, shipping labels, and financial overview"
  */
 
+// Gap 5: All invoice endpoints require authentication + recent 2FA verification
+// (users without 2FA enabled pass through requireRecentMFA automatically)
 router.use(authenticate);
+router.use(requireRecentMFA());
 
 /**
  * @swagger

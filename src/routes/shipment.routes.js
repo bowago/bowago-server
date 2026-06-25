@@ -597,9 +597,12 @@ router.patch(
  *       403:
  *         description: Admin access required
  */
+// ── PRD Sprint 8: Only MASTER / LOGISTICS_MANAGER / SUPER_ADMIN can assign
+// a dispatcher to a shipment. ROLE_DISPATCHER cannot self-assign.
+// requireLogisticsOrAbove = SUPER_ADMIN | LOGISTICS_MANAGER | ROLE_ADMIN(canManageShipments)
 router.patch(
   "/:id/assign",
-  requireSubRole("ROLE_DISPATCHER"), // PRD: DISPATCHER manages shipment assignments
+  requireLogisticsOrAbove,
   shipmentController.assignShipment,
 );
 

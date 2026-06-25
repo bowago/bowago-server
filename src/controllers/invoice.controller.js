@@ -10,6 +10,44 @@ const {
   sendInvoiceEmail,
   sendBookingConfirmationEmail,
 } = require("../services/invoiceEmail.service");
+const { cloudinary } = require("../config/cloudinary");
+
+async function uploadPDFAndGetSignedUrl(pdfBuffer, folder, filename) {
+  // Upload to Cloudinary private folder
+  const uploadResult = await new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: `bowago/pdfs/${folder}`,
+        public_id: filename,
+        resource_type: "raw",
+        type: "private", // not publicly accessible
+        overwrite: true,
+      },
+      (err, result) => {
+        if (err) reject(err);
+        else resolve(result);
+      },
+    );
+    uploadStream.end(pdfBuffer);
+  });
+
+  // Generate signed URL with 24-hour expiry
+  const EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours
+  const signedUrl = cloudinary.utils.private_download_url(
+    uploadResult.public_id,
+    "pdf",
+    {
+      resource_type: "raw",
+      expires_at: Math.floor(Date.now() / 1000) + EXPIRY_SECONDS,
+    },
+  );
+
+  return {
+    signedUrl,
+    publicId: uploadResult.public_id,
+    expiresInSeconds: EXPIRY_SECONDS,
+  };
+}
 
 // ─── Helper: build invoice number ─────────────────────────────────────────────
 function buildInvoiceNumber(payment) {
@@ -129,7 +167,7 @@ async function getInvoice(req, res) {
   });
 }
 
-// ─── GET /invoices/:paymentId/download — Stream PDF to browser ───────────────
+// ─── GET /invoices/:paymentId/download — Generate PDF, store on Cloudinary, return signed URL ─
 async function downloadInvoicePDF(req, res) {
   const { paymentId } = req.params;
 
@@ -164,12 +202,46 @@ async function downloadInvoicePDF(req, res) {
     surchargeBreakdown: getSurchargeBreakdown(payment.shipment),
   });
 
-  res.set({
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="BowaGO-Invoice-${invoiceNumber}.pdf"`,
-    "Content-Length": pdfBuffer.length,
-  });
-  res.send(pdfBuffer);
+  await prisma.activityLog
+    .create({
+      data: {
+        userId: req.user.id,
+        action: "DOWNLOAD_INVOICE_PDF",
+        resource: "Invoice",
+        metadata: { paymentId, invoiceNumber },
+      },
+    })
+    .catch(() => {}); // non-blocking
+
+  try {
+    const { signedUrl, expiresInSeconds } = await uploadPDFAndGetSignedUrl(
+      pdfBuffer,
+      `invoices/${payment.userId}`,
+      `invoice-${invoiceNumber}-${Date.now()}`,
+    );
+    return success(
+      res,
+      {
+        signedUrl,
+        filename: `BowaGO-Invoice-${invoiceNumber}.pdf`,
+        expiresInSeconds,
+        expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      },
+      "Invoice download link generated (valid 24 hours)",
+    );
+  } catch (cloudinaryErr) {
+    // Fallback: stream directly if Cloudinary upload fails
+    console.error(
+      "[invoice] Cloudinary upload failed, streaming directly:",
+      cloudinaryErr.message,
+    );
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="BowaGO-Invoice-${invoiceNumber}.pdf"`,
+      "Content-Length": pdfBuffer.length,
+    });
+    return res.send(pdfBuffer);
+  }
 }
 
 // ─── GET /invoices/:paymentId/email — Send invoice to customer's email ────────
@@ -232,12 +304,45 @@ async function downloadShippingLabel(req, res) {
 
   const pdfBuffer = await generateShippingLabelPDF(shipment);
 
-  res.set({
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="BowaGO-Label-${shipment.trackingNumber}.pdf"`,
-    "Content-Length": pdfBuffer.length,
-  });
-  res.send(pdfBuffer);
+  await prisma.activityLog
+    .create({
+      data: {
+        userId: req.user.id,
+        action: "DOWNLOAD_SHIPPING_LABEL",
+        resource: "Shipment",
+        metadata: { shipmentId: id },
+      },
+    })
+    .catch(() => {});
+
+  try {
+    const { signedUrl, expiresInSeconds } = await uploadPDFAndGetSignedUrl(
+      pdfBuffer,
+      `labels/${shipment.customerId}`,
+      `label-${shipment.trackingNumber}-${Date.now()}`,
+    );
+    return success(
+      res,
+      {
+        signedUrl,
+        filename: `BowaGO-Label-${shipment.trackingNumber}.pdf`,
+        expiresInSeconds,
+        expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      },
+      "Shipping label download link generated (valid 24 hours)",
+    );
+  } catch (cloudinaryErr) {
+    console.error(
+      "[invoice] Cloudinary label upload failed, streaming directly:",
+      cloudinaryErr.message,
+    );
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="BowaGO-Label-${shipment.trackingNumber}.pdf"`,
+      "Content-Length": pdfBuffer.length,
+    });
+    return res.send(pdfBuffer);
+  }
 }
 
 // ─── GET /shipments/:id/confirmation — Booking confirmation PDF ───────────────
@@ -264,12 +369,45 @@ async function downloadBookingConfirmation(req, res) {
     quote: { surchargeBreakdown },
   });
 
-  res.set({
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="BowaGO-Confirmation-${shipment.trackingNumber}.pdf"`,
-    "Content-Length": pdfBuffer.length,
-  });
-  res.send(pdfBuffer);
+  await prisma.activityLog
+    .create({
+      data: {
+        userId: req.user.id,
+        action: "DOWNLOAD_BOOKING_CONFIRMATION",
+        resource: "Shipment",
+        metadata: { shipmentId: id },
+      },
+    })
+    .catch(() => {});
+
+  try {
+    const { signedUrl, expiresInSeconds } = await uploadPDFAndGetSignedUrl(
+      pdfBuffer,
+      `confirmations/${shipment.customerId}`,
+      `confirmation-${shipment.trackingNumber}-${Date.now()}`,
+    );
+    return success(
+      res,
+      {
+        signedUrl,
+        filename: `BowaGO-Confirmation-${shipment.trackingNumber}.pdf`,
+        expiresInSeconds,
+        expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      },
+      "Booking confirmation download link generated (valid 24 hours)",
+    );
+  } catch (cloudinaryErr) {
+    console.error(
+      "[invoice] Cloudinary confirmation upload failed, streaming directly:",
+      cloudinaryErr.message,
+    );
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="BowaGO-Confirmation-${shipment.trackingNumber}.pdf"`,
+      "Content-Length": pdfBuffer.length,
+    });
+    return res.send(pdfBuffer);
+  }
 }
 
 // ─── Admin: Financial overview ────────────────────────────────────────────────
@@ -344,11 +482,11 @@ async function myInvoiceSummary(req, res) {
   const userId = req.user.id;
 
   const [paid, pending, refunded, totalSpent] = await Promise.all([
-    prisma.payment.count({ where: { userId, status: 'PAID' } }),
-    prisma.payment.count({ where: { userId, status: 'PENDING' } }),
-    prisma.payment.count({ where: { userId, status: 'REFUNDED' } }),
+    prisma.payment.count({ where: { userId, status: "PAID" } }),
+    prisma.payment.count({ where: { userId, status: "PENDING" } }),
+    prisma.payment.count({ where: { userId, status: "REFUNDED" } }),
     prisma.payment.aggregate({
-      where: { userId, status: 'PAID' },
+      where: { userId, status: "PAID" },
       _sum: { amountKobo: true },
     }),
   ]);
@@ -359,11 +497,10 @@ async function myInvoiceSummary(req, res) {
       paidInvoices: paid,
       pendingInvoices: pending,
       refundedCount: refunded,
-      currency: 'NGN',
+      currency: "NGN",
     },
   });
 }
-
 
 module.exports = {
   myInvoices,
@@ -398,9 +535,11 @@ async function adminListInvoices(req, res) {
       where,
       skip,
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       include: {
-        user: { select: { id: true, firstName: true, lastName: true, email: true } },
+        user: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
         shipment: {
           select: {
             id: true,
@@ -432,7 +571,7 @@ async function adminListInvoices(req, res) {
 
   return res.json({
     success: true,
-    message: 'Invoices retrieved',
+    message: "Invoices retrieved",
     data: { invoices },
     meta: buildMeta(total, page, limit),
   });

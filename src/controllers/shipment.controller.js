@@ -1,4 +1,5 @@
 const { prisma } = require("../config/db");
+const { checkProximityAndNotify } = require("../services/proximity.service");
 const { calculateShippingCost } = require("../services/pricing.service");
 const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
@@ -19,18 +20,20 @@ async function recordConsent(userId, consentType, req) {
       data: {
         userId: userId || null,
         consentType,
-        tcVersion: process.env.TC_VERSION || 'v1.0',
-        ipAddress: req.ip || req.headers['x-forwarded-for'] || null,
-        userAgent: req.headers['user-agent'] || null,
+        tcVersion: process.env.TC_VERSION || "v1.0",
+        ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
+        userAgent: req.headers["user-agent"] || null,
       },
     });
-  } catch (_) { /* non-blocking */ }
+  } catch (_) {
+    /* non-blocking */
+  }
 }
 
 // ─── CREATE SHIPMENT ──────────────────────────────────────────────────────────
 async function createShipment(req, res) {
-  console.log('[createShipment] START — body keys:', Object.keys(req.body));
-  console.log('[createShipment] user:', req.user?.id, 'role:', req.user?.role);
+  console.log("[createShipment] START — body keys:", Object.keys(req.body));
+  console.log("[createShipment] user:", req.user?.id, "role:", req.user?.role);
 
   const {
     senderName,
@@ -61,19 +64,33 @@ async function createShipment(req, res) {
     quoteId,
   } = req.body;
 
-  console.log('[createShipment] route:', senderCity, '→', recipientCity, '| quoteId:', quoteId || 'none');
-  console.log('[createShipment] weight params — weightKg:', weightKg, 'tons:', tons, 'cartons:', cartons, 'boxDimensionId:', boxDimensionId);
+  console.log(
+    "[createShipment] route:",
+    senderCity,
+    "→",
+    recipientCity,
+    "| quoteId:",
+    quoteId || "none",
+  );
+  console.log(
+    "[createShipment] weight params — weightKg:",
+    weightKg,
+    "tons:",
+    tons,
+    "cartons:",
+    cartons,
+    "boxDimensionId:",
+    boxDimensionId,
+  );
 
   let lockedQuote = null;
   let quote;
   let quotedPrice;
   let resolvedServiceType = serviceType || "STANDARD";
-  let resolvedInsuranceValue = requiresInsurance
-    ? (insuranceValue || null)
-    : 0;
+  let resolvedInsuranceValue = requiresInsurance ? insuranceValue || null : 0;
 
   if (quoteId) {
-    console.log('[createShipment] using locked quote:', quoteId);
+    console.log("[createShipment] using locked quote:", quoteId);
     lockedQuote = await prisma.quote.findUnique({ where: { id: quoteId } });
     if (!lockedQuote) throw new ApiError(404, "Quote not found");
 
@@ -82,14 +99,26 @@ async function createShipment(req, res) {
     }
 
     if (lockedQuote.status === "CANCELLED") {
-      throw new ApiError(400, "This quote was cancelled. Please generate a new quote.");
+      throw new ApiError(
+        400,
+        "This quote was cancelled. Please generate a new quote.",
+      );
     }
     if (lockedQuote.status !== "GENERATED") {
-      throw new ApiError(400, `This quote has already been used (status: ${lockedQuote.status}). Please generate a new quote.`);
+      throw new ApiError(
+        400,
+        `This quote has already been used (status: ${lockedQuote.status}). Please generate a new quote.`,
+      );
     }
     if (new Date() > lockedQuote.expiresAt) {
-      await prisma.quote.update({ where: { id: quoteId }, data: { status: "EXPIRED" } });
-      throw new ApiError(400, "This quote has expired (15-minute limit). Please generate a new quote.");
+      await prisma.quote.update({
+        where: { id: quoteId },
+        data: { status: "EXPIRED" },
+      });
+      throw new ApiError(
+        400,
+        "This quote has expired (15-minute limit). Please generate a new quote.",
+      );
     }
 
     const [fromCityRec, toCityRec] = await Promise.all([
@@ -97,15 +126,29 @@ async function createShipment(req, res) {
       prisma.city.findUnique({ where: { id: lockedQuote.destinationCityId } }),
     ]);
     if (!fromCityRec || !toCityRec) {
-      throw new ApiError(400, "Quote references a city that no longer exists. Please generate a new quote.");
+      throw new ApiError(
+        400,
+        "Quote references a city that no longer exists. Please generate a new quote.",
+      );
     }
 
     if (
-      fromCityRec.name.toLowerCase() !== String(senderCity ?? "").toLowerCase() ||
+      fromCityRec.name.toLowerCase() !==
+        String(senderCity ?? "").toLowerCase() ||
       toCityRec.name.toLowerCase() !== String(recipientCity ?? "").toLowerCase()
     ) {
-      console.log('[createShipment] city mismatch — quoted:', fromCityRec.name, toCityRec.name, '| sent:', senderCity, recipientCity);
-      throw new ApiError(400, "Sender/recipient cities do not match the quoted route. Please generate a new quote.");
+      console.log(
+        "[createShipment] city mismatch — quoted:",
+        fromCityRec.name,
+        toCityRec.name,
+        "| sent:",
+        senderCity,
+        recipientCity,
+      );
+      throw new ApiError(
+        400,
+        "Sender/recipient cities do not match the quoted route. Please generate a new quote.",
+      );
     }
 
     quote = {
@@ -123,7 +166,7 @@ async function createShipment(req, res) {
       resolvedInsuranceValue = lockedQuote.declaredValueKobo / 100;
     }
   } else {
-    console.log('[createShipment] no quoteId — calculating live price');
+    console.log("[createShipment] no quoteId — calculating live price");
     quote = await calculateShippingCost({
       fromCity: senderCity,
       toCity: recipientCity,
@@ -143,13 +186,22 @@ async function createShipment(req, res) {
     quotedPrice = quote.total;
   }
 
-  console.log('[createShipment] quote resolved — zone:', quote.zone, 'weightKg:', quote.weightKg, 'quotedPrice:', quotedPrice);
+  console.log(
+    "[createShipment] quote resolved — zone:",
+    quote.zone,
+    "weightKg:",
+    quote.weightKg,
+    "quotedPrice:",
+    quotedPrice,
+  );
 
   let resolvedPickupDate = pickupDate ? new Date(pickupDate) : new Date();
   let cutoffWarning = false;
 
   try {
-    const nowWAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' }));
+    const nowWAT = new Date(
+      new Date().toLocaleString("en-US", { timeZone: "Africa/Lagos" }),
+    );
     const bookingHour = nowWAT.getHours();
     if (bookingHour >= 14) {
       cutoffWarning = true;
@@ -162,20 +214,28 @@ async function createShipment(req, res) {
         resolvedPickupDate = next;
       }
     }
-    console.log('[createShipment] cutoffWarning:', cutoffWarning, '| resolvedPickupDate:', resolvedPickupDate);
+    console.log(
+      "[createShipment] cutoffWarning:",
+      cutoffWarning,
+      "| resolvedPickupDate:",
+      resolvedPickupDate,
+    );
   } catch (tzErr) {
-    console.warn('[createShipment] timezone error (non-fatal):', tzErr.message);
+    console.warn("[createShipment] timezone error (non-fatal):", tzErr.message);
   }
 
   const slaResult = await getEstimatedDelivery(
     quote.zone,
     resolvedServiceType,
-    resolvedPickupDate
+    resolvedPickupDate,
   );
-  console.log('[createShipment] SLA estimated delivery:', slaResult.estimatedDelivery);
+  console.log(
+    "[createShipment] SLA estimated delivery:",
+    slaResult.estimatedDelivery,
+  );
 
   // PRD Sprint 3 state machine: Quoted → BOOKED (on creation) → Paid → Awaiting Pickup
-  console.log('[createShipment] creating shipment record in DB...');
+  console.log("[createShipment] creating shipment record in DB...");
   const shipment = await prisma.shipment.create({
     data: {
       trackingNumber: generateTrackingNumber(),
@@ -221,26 +281,35 @@ async function createShipment(req, res) {
     include: {
       trackingHistory: true,
       fromCity: { select: { id: true, name: true, region: true, state: true } },
-      toCity:   { select: { id: true, name: true, region: true, state: true } },
+      toCity: { select: { id: true, name: true, region: true, state: true } },
     },
   });
 
-  console.log('[createShipment] shipment created — id:', shipment.id, 'tracking:', shipment.trackingNumber);
+  console.log(
+    "[createShipment] shipment created — id:",
+    shipment.id,
+    "tracking:",
+    shipment.trackingNumber,
+  );
 
   if (lockedQuote) {
     await prisma.quote.update({
       where: { id: lockedQuote.id },
       data: { status: "BOOKED", bookedAt: new Date(), shipmentId: shipment.id },
     });
-    console.log('[createShipment] quote marked BOOKED');
+    console.log("[createShipment] quote marked BOOKED");
   }
 
   // Sprint 7: SHIPPING_RULES consent (fire-and-forget)
-  recordConsent(req.user.id, 'SHIPPING_RULES', req);
+  recordConsent(req.user.id, "SHIPPING_RULES", req);
 
-  return created(res, { shipment, quote, cutoffWarning }, cutoffWarning
-    ? 'Shipment created. Booking after 2PM — earliest pickup is next business day.'
-    : 'Shipment created successfully');
+  return created(
+    res,
+    { shipment, quote, cutoffWarning },
+    cutoffWarning
+      ? "Shipment created. Booking after 2PM — earliest pickup is next business day."
+      : "Shipment created successfully",
+  );
 }
 
 // ─── LIST SHIPMENTS (Customer) ────────────────────────────────────────────────
@@ -305,7 +374,7 @@ async function getShipment(req, res) {
         select: { id: true, firstName: true, lastName: true },
       },
       fromCity: { select: { id: true, name: true, region: true, state: true } },
-      toCity:   { select: { id: true, name: true, region: true, state: true } },
+      toCity: { select: { id: true, name: true, region: true, state: true } },
       trackingHistory: { orderBy: { createdAt: "asc" } },
       documents: true,
     },
@@ -377,16 +446,20 @@ async function trackShipment(req, res) {
     ...shipment,
     senderAddress: isOwner
       ? shipment.senderAddress
-      : [shipment.senderCity, shipment.senderState, 'NG'].filter(Boolean).join(', '),
+      : [shipment.senderCity, shipment.senderState, "NG"]
+          .filter(Boolean)
+          .join(", "),
     recipientAddress: isOwner
       ? shipment.recipientAddress
-      : [shipment.recipientCity, shipment.recipientState, 'NG'].filter(Boolean).join(', '),
+      : [shipment.recipientCity, shipment.recipientState, "NG"]
+          .filter(Boolean)
+          .join(", "),
     recipientName: isOwner
       ? shipment.recipientName
-      : (shipment.recipientName?.split(' ')[0] ?? '') + ' ***',
+      : (shipment.recipientName?.split(" ")[0] ?? "") + " ***",
     senderName: isOwner
       ? shipment.senderName
-      : (shipment.senderName?.split(' ')[0] ?? '') + ' ***',
+      : (shipment.senderName?.split(" ")[0] ?? "") + " ***",
   };
 
   // Remove internal fields from response
@@ -472,7 +545,7 @@ async function updateShipmentStatus(req, res) {
   // Fetch updated timeline so the tracking room gets the full event list
   const timeline = await prisma.trackingEvent.findMany({
     where: { shipmentId: id },
-    orderBy: { createdAt: 'desc' },
+    orderBy: { createdAt: "desc" },
     take: 20,
   });
   socketService.emitShipmentUpdate(updated, timeline);
@@ -501,11 +574,15 @@ async function assignShipment(req, res) {
 // ─── CANCEL PREVIEW — step 1: returns calculated refund before confirming ─────
 async function cancelPreview(req, res) {
   const { id } = req.params;
+  const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(req.user.role);
+
+  // Admins can preview cancellation for any shipment; customers only for their own
+  const whereClause = isAdmin ? { id } : { id, customerId: req.user.id };
 
   const shipment = await prisma.shipment.findFirst({
-    where: { id, customerId: req.user.id },
+    where: whereClause,
     include: {
-      payment: {
+      payments: {
         where: { status: "PAID" },
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -514,25 +591,33 @@ async function cancelPreview(req, res) {
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  if (!["PENDING", "CONFIRMED"].includes(shipment.status)) {
+  const CANCELLABLE = ["PENDING", "BOOKED", "AWAITING_PICKUP", "CONFIRMED"];
+  if (!CANCELLABLE.includes(shipment.status)) {
     throw new ApiError(400, "Shipment cannot be cancelled at this stage");
   }
 
-  const payment = shipment.payment?.[0] || null;
+  const payment = shipment.payments?.[0] || null;
   const paidAmount = payment ? payment.amountKobo / 100 : 0;
 
-  // Refund policy: 100% if PENDING (not yet confirmed), 80% if CONFIRMED
+  // Refund policy per PRD:
+  // PENDING / BOOKED (not yet paid)      → no refund applicable
+  // AWAITING_PICKUP (paid, not picked up) → 100% full refund
+  // CONFIRMED (paid, being processed)     → 80% partial refund
   let refundPercent = 0;
   let refundReason = "";
   if (!payment || paidAmount === 0) {
     refundPercent = 0;
     refundReason = "No payment made — no refund applicable";
-  } else if (shipment.status === "PENDING") {
+  } else if (["PENDING", "BOOKED"].includes(shipment.status)) {
     refundPercent = 100;
-    refundReason = "Full refund — shipment not yet confirmed";
+    refundReason = "Full refund — payment made but shipment not yet processed";
+  } else if (shipment.status === "AWAITING_PICKUP") {
+    refundPercent = 100;
+    refundReason = "Full refund — shipment paid but not yet picked up";
   } else if (shipment.status === "CONFIRMED") {
     refundPercent = 80;
-    refundReason = "Partial refund (80%) — shipment already confirmed";
+    refundReason =
+      "Partial refund (80%) — shipment already confirmed for processing";
   }
 
   const refundAmount = Math.floor(paidAmount * (refundPercent / 100));
@@ -559,11 +644,15 @@ async function cancelPreview(req, res) {
 async function cancelShipment(req, res) {
   const { id } = req.params;
   const { reason } = req.body;
+  const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(req.user.role);
+
+  // Admins can cancel any shipment; customers only their own
+  const whereClause = isAdmin ? { id } : { id, customerId: req.user.id };
 
   const shipment = await prisma.shipment.findFirst({
-    where: { id, customerId: req.user.id },
+    where: whereClause,
     include: {
-      payment: {
+      payments: {
         where: { status: "PAID" },
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -572,52 +661,108 @@ async function cancelShipment(req, res) {
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  if (!["PENDING", "CONFIRMED"].includes(shipment.status)) {
+  // ── PRD Sprint 3: Cancellable statuses aligned with refund rules table ─────────
+  // PICKED_UP → partial 92% refund (warehouse fee deducted; PRD says 90-95%)
+  // FAILED    → partial 95% refund (operator fee deducted; PRD: "full minus fee")
+  // IN_TRANSIT / OUT_FOR_DELIVERY / DELIVERED → no cancel; must file claim
+  const CANCELLABLE_STATUSES = [
+    "PENDING",
+    "BOOKED",
+    "AWAITING_PICKUP",
+    "CONFIRMED",
+    "PICKED_UP",
+    "FAILED",
+  ];
+
+  if (!CANCELLABLE_STATUSES.includes(shipment.status)) {
     throw new ApiError(
       400,
-      "Cannot cancel a shipment that is already in transit",
+      shipment.status === "DELIVERED"
+        ? "Cannot cancel a delivered shipment. File a damage/loss claim instead."
+        : "Cannot cancel — shipment is in transit. Contact support or file a claim.",
     );
   }
 
-  const payment = shipment.payment?.[0] || null;
+  const payment = shipment.payments?.[0] || null;
   const paidAmount = payment ? payment.amountKobo / 100 : 0;
 
-  let refundAmount = 0;
+  // ── PRD refund % by status ────────────────────────────────────────────────────
+  let refundPercent = 0;
   if (payment && paidAmount > 0) {
-    const refundPercent = shipment.status === "PENDING" ? 100 : 80;
-    refundAmount = Math.floor(paidAmount * (refundPercent / 100));
+    if (
+      ["PENDING", "BOOKED", "AWAITING_PICKUP", "CONFIRMED"].includes(
+        shipment.status,
+      )
+    ) {
+      refundPercent = 100;
+    } else if (shipment.status === "PICKED_UP") {
+      refundPercent = 92; // PRD: 90-95%; 92% midpoint (deduct warehouse fee)
+    } else if (shipment.status === "FAILED") {
+      refundPercent = 95; // PRD: full minus operator fee
+    }
   }
+  const refundAmount = Math.floor(paidAmount * (refundPercent / 100));
 
-  // Cancel the shipment
+  // ── Cancel the shipment ───────────────────────────────────────────────────────
   await prisma.$transaction([
-    prisma.shipment.update({ where: { id }, data: { status: "CANCELLED" } }),
+    prisma.shipment.update({
+      where: { id },
+      data: {
+        status: "CANCELLED",
+        // Mark paymentStatus REFUNDED immediately so UI reflects correct state
+        ...(refundAmount > 0 && payment ? { paymentStatus: "REFUNDED" } : {}),
+      },
+    }),
     prisma.trackingEvent.create({
       data: {
         shipmentId: id,
         status: "CANCELLED",
-        description: reason || "Cancelled by customer",
+        description:
+          reason ||
+          `Cancelled by ${req.user.role === "ADMIN" ? "admin" : "customer"}`,
         updatedBy: req.user.id,
       },
     }),
   ]);
 
-  // Trigger refund if payment exists
+  // ── Trigger Paystack refund ───────────────────────────────────────────────────
   let refundResult = null;
   if (payment && refundAmount > 0) {
     const { refundPayment } = require("../services/paystack.service");
     refundResult = await refundPayment(payment.reference, refundAmount);
   }
 
+  // ── Notify customer ───────────────────────────────────────────────────────────
+  await prisma.notification
+    .create({
+      data: {
+        userId: shipment.customerId,
+        type: "SHIPMENT_UPDATE",
+        title: `Shipment ${shipment.trackingNumber} Cancelled`,
+        body:
+          refundAmount > 0
+            ? `Your shipment has been cancelled. A refund of ₦${refundAmount.toLocaleString()} (${refundPercent}%) has been initiated and will reflect in 3-5 business days.`
+            : `Your shipment has been cancelled. No refund is applicable.`,
+        data: {
+          shipmentId: id,
+          status: "CANCELLED",
+          trackingNumber: shipment.trackingNumber,
+        },
+      },
+    })
+    .catch(() => {}); // non-blocking
+
   return success(
     res,
     {
       cancelled: true,
       refundAmount,
+      refundPercent,
       refundInitiated: !!refundResult,
       currency: "NGN",
     },
     refundResult
-      ? `Shipment cancelled. Refund of ₦${refundAmount.toLocaleString()} initiated.`
+      ? `Shipment cancelled. Refund of ₦${refundAmount.toLocaleString()} (${refundPercent}%) initiated.`
       : "Shipment cancelled. No refund applicable.",
   );
 }
@@ -630,7 +775,7 @@ async function adminListShipments(req, res) {
   const statusFilter = (() => {
     if (!status) return undefined;
     // Support `?status=A,B,C` or repeated `?status=A&status=B`
-    const values = Array.isArray(status) ? status : String(status).split(',');
+    const values = Array.isArray(status) ? status : String(status).split(",");
     return values.length > 1 ? { in: values } : values[0];
   })();
 
@@ -668,7 +813,7 @@ async function adminListShipments(req, res) {
         },
         assignedTo: { select: { id: true, firstName: true, lastName: true } },
         fromCity: { select: { id: true, name: true, state: true } },
-        toCity:   { select: { id: true, name: true, state: true } },
+        toCity: { select: { id: true, name: true, state: true } },
         trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
       },
     }),
@@ -712,6 +857,148 @@ async function getShipmentStats(req, res) {
   });
 }
 
+// ─── DRIVER LOCATION UPDATE — Sprint 4 ───────────────────────────────────────
+// POST /shipments/:id/driver-location
+// Called by driver app every ~5 min. Appends a tracking event, broadcasts
+// via Socket.IO, and triggers the PRD-specified proximity alert (≤ 500 m).
+async function updateDriverLocation(req, res) {
+  const { id } = req.params;
+  const { lat, lng, location } = req.body;
+
+  if (lat == null || lng == null) {
+    throw new ApiError(400, "lat and lng are required");
+  }
+
+  const shipment = await prisma.shipment.findUnique({
+    where: { id },
+    select: { id: true, customerId: true, trackingNumber: true, status: true },
+  });
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  // Persist as a tracking event so the map has data to display
+  const event = await prisma.trackingEvent.create({
+    data: {
+      shipmentId: id,
+      status: shipment.status,
+      description: location ?? "Driver location updated",
+      location: location ?? null,
+      lat,
+      lng,
+      updatedBy: req.user.id,
+    },
+  });
+
+  // Broadcast to tracking page subscribers (Socket.IO room = tracking:<number>)
+  socketService.emitShipmentUpdate(shipment.trackingNumber, {
+    type: "DRIVER_LOCATION",
+    trackingNumber: shipment.trackingNumber,
+    lat,
+    lng,
+    location: location ?? null,
+    timestamp: event.createdAt,
+  });
+
+  // Proximity check — fire-and-forget, must not fail the response
+  checkProximityAndNotify(id, lat, lng).catch((err) =>
+    console.error("[proximity] check failed:", err.message),
+  );
+
+  return success(res, { lat, lng, location }, "Location updated");
+}
+
+// ─── ADMIN CSV EXPORT — Sprint 6 ─────────────────────────────────────────────
+// GET /shipments/export/csv
+// Downloads a .csv of all shipments, respecting optional filters.
+// Uses the xlsx package that is already in package.json.
+async function exportShipmentsCsv(req, res) {
+  const { status, fromDate, toDate } = req.query;
+
+  const where = {
+    ...(status ? { status } : {}),
+    ...(fromDate || toDate
+      ? {
+          createdAt: {
+            ...(fromDate ? { gte: new Date(fromDate) } : {}),
+            ...(toDate ? { lte: new Date(toDate) } : {}),
+          },
+        }
+      : {}),
+  };
+
+  const shipments = await prisma.shipment.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 10_000,
+    select: {
+      trackingNumber: true,
+      status: true,
+      paymentStatus: true,
+      serviceType: true,
+      senderName: true,
+      senderCity: true,
+      senderState: true,
+      recipientName: true,
+      recipientCity: true,
+      recipientState: true,
+      weight: true,
+      weightUnit: true,
+      quotedPrice: true,
+      finalPrice: true,
+      pickupDate: true,
+      estimatedDelivery: true,
+      deliveredAt: true,
+      createdAt: true,
+      customer: { select: { email: true, firstName: true, lastName: true } },
+    },
+  });
+
+  const XLSX = require("xlsx");
+
+  const rows = shipments.map((s) => ({
+    "Tracking Number": s.trackingNumber,
+    Status: s.status,
+    "Payment Status": s.paymentStatus,
+    Service: s.serviceType,
+    "Customer Name": s.customer
+      ? `${s.customer.firstName} ${s.customer.lastName}`
+      : "",
+    "Customer Email": s.customer?.email ?? "",
+    "Sender Name": s.senderName,
+    "Sender City": s.senderCity,
+    "Sender State": s.senderState,
+    "Recipient Name": s.recipientName,
+    "Recipient City": s.recipientCity,
+    "Recipient State": s.recipientState,
+    Weight: s.weight != null ? `${s.weight} ${s.weightUnit ?? "kg"}` : "",
+    "Quoted Price (N)":
+      s.quotedPrice != null ? (s.quotedPrice / 100).toFixed(2) : "",
+    "Final Price (N)":
+      s.finalPrice != null ? (s.finalPrice / 100).toFixed(2) : "",
+    "Pickup Date": s.pickupDate
+      ? new Date(s.pickupDate).toISOString().slice(0, 10)
+      : "",
+    "Est. Delivery": s.estimatedDelivery
+      ? new Date(s.estimatedDelivery).toISOString().slice(0, 10)
+      : "",
+    "Delivered At": s.deliveredAt
+      ? new Date(s.deliveredAt).toISOString().slice(0, 10)
+      : "",
+    "Created At": new Date(s.createdAt).toISOString().slice(0, 10),
+  }));
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Shipments");
+
+  const date = new Date().toISOString().slice(0, 10);
+  const filename = `BowaGo-Shipments-${date}.csv`;
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "csv" });
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buf);
+}
+
 module.exports = {
   createShipment,
   listMyShipments,
@@ -723,4 +1010,6 @@ module.exports = {
   cancelShipment,
   adminListShipments,
   getShipmentStats,
+  updateDriverLocation,
+  exportShipmentsCsv,
 };

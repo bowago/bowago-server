@@ -1,6 +1,6 @@
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const multer = require('multer');
+const cloudinary = require("cloudinary").v2;
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const multer = require("multer");
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -13,27 +13,33 @@ cloudinary.config({
 const avatarStorage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: 'bowago/avatars',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face' }],
+    folder: "bowago/avatars",
+    allowed_formats: ["jpg", "jpeg", "png", "webp"],
+    transformation: [
+      { width: 400, height: 400, crop: "fill", gravity: "face" },
+    ],
   },
 });
 
 const documentStorage = new CloudinaryStorage({
   cloudinary,
-  params: (req, file) => ({
-    folder: `bowago/shipments/${req.params.shipmentId || 'general'}`,
-    allowed_formats: ['jpg', 'jpeg', 'png', 'pdf'],
-    resource_type: 'auto',
-  }),
+  params: (req, file) => {
+    const shipmentId =
+      req.params.shipmentId || req.body?.shipmentId || "general";
+    return {
+      folder: `bowago/shipments/${shipmentId}`,
+      allowed_formats: ["jpg", "jpeg", "png", "pdf"],
+      resource_type: "auto",
+    };
+  },
 });
 
 const importStorage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: 'bowago/imports',
-    allowed_formats: ['xlsx', 'csv'],
-    resource_type: 'raw',
+    folder: "bowago/imports",
+    allowed_formats: ["xlsx", "csv"],
+    resource_type: "raw",
   },
 });
 
@@ -54,24 +60,27 @@ const uploadImport = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
     if (
-      file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-      file.mimetype === 'application/vnd.ms-excel' ||
-      file.mimetype === 'text/csv'
+      file.mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      file.mimetype === "application/vnd.ms-excel" ||
+      file.mimetype === "text/csv"
     ) {
       cb(null, true);
     } else {
-      cb(new Error('Only Excel and CSV files are allowed'), false);
+      cb(new Error("Only Excel and CSV files are allowed"), false);
     }
   },
 });
 
 // ─── Helper: Delete from Cloudinary ──────────────────────────────────────────
 
-async function deleteFromCloudinary(publicId, resourceType = 'image') {
+async function deleteFromCloudinary(publicId, resourceType = "image") {
   try {
-    return await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+    return await cloudinary.uploader.destroy(publicId, {
+      resource_type: resourceType,
+    });
   } catch (err) {
-    console.error('Cloudinary delete error:', err);
+    console.error("Cloudinary delete error:", err);
   }
 }
 

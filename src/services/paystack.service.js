@@ -51,6 +51,7 @@ async function initializePayment({
   shipmentId,
   amountNaira,
   email,
+  idempotencyKey = null,
   metadata = {},
 }) {
   if (!PAYSTACK_SECRET)
@@ -76,6 +77,7 @@ async function initializePayment({
   if (!response.status)
     throw new ApiError(502, response.message || "Failed to initialize payment");
 
+  // Gap 1: store authorizationUrl + accessCode so we can reuse them on duplicate requests
   await prisma.payment.create({
     data: {
       reference,
@@ -85,6 +87,9 @@ async function initializePayment({
       currency: "NGN",
       status: "PENDING",
       metadata,
+      authorizationUrl: response.data.authorization_url,
+      accessCode: response.data.access_code,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
     },
   });
 

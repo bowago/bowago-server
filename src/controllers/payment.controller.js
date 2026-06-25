@@ -17,15 +17,15 @@ async function recordConsent(userId, consentType, req) {
   try {
     await prisma.consentLog.create({
       data: {
-        userId:    userId || null,
+        userId: userId || null,
         consentType,
-        tcVersion: process.env.TC_VERSION || 'v1.0',
-        ipAddress: req.ip || req.headers['x-forwarded-for'] || null,
-        userAgent: req.headers['user-agent'] || null,
+        tcVersion: process.env.TC_VERSION || "v1.0",
+        ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
+        userAgent: req.headers["user-agent"] || null,
       },
     });
   } catch (err) {
-    console.error('[Consent] Failed to log payment consent:', err.message);
+    console.error("[Consent] Failed to log payment consent:", err.message);
   }
 }
 
@@ -37,26 +37,67 @@ async function initPayment(req, res) {
 
   // ─── Sprint 7: Refund policy consent required before payment ────────────
   if (!refundPolicyAccepted) {
-    throw new ApiError(400, 'You must acknowledge the Refund Policy before proceeding to payment.');
+    throw new ApiError(
+      400,
+      "You must acknowledge the Refund Policy before proceeding to payment.",
+    );
+  }
+  const idempotencyKey =
+    req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
+  if (idempotencyKey) {
+    const cached = await prisma.payment.findFirst({
+      where: {
+        idempotencyKey,
+        userId,
+        createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) }, // 60-min TTL
+      },
+    });
+    if (cached) {
+      return success(
+        res,
+        {
+          reference: cached.reference,
+          authorizationUrl: cached.authorizationUrl,
+          accessCode: cached.accessCode,
+          idempotent: true,
+        },
+        "Payment already initialized (idempotent response)",
+      );
+    }
   }
 
   // Only customers can initiate Paystack payment — admins use markAsPaid instead.
   const shipment = await prisma.shipment.findFirst({
     where: { id: shipmentId, customerId: userId },
   });
-  if (!shipment) throw new ApiError(404, 'Shipment not found');
+  if (!shipment) throw new ApiError(404, "Shipment not found");
   if (shipment.paymentStatus === "PAID")
     throw new ApiError(400, "Shipment is already paid");
 
-  // Check for existing pending payment (idempotency)
+  // Reuse unexpired PENDING payment (prevents duplicate Paystack tx) ──
+  // If a PENDING payment already exists for this shipment and was created within
+  // the last 30 minutes, reuse its authorization URL instead of creating a new one.
   const existingPending = await prisma.payment.findFirst({
-    where: { shipmentId, userId, status: "PENDING" },
+    where: {
+      shipmentId,
+      userId,
+      status: "PENDING",
+      createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) }, // 30-min window
+    },
     orderBy: { createdAt: "desc" },
   });
 
-  // Reuse unexpired pending payment if it exists
-  if (existingPending) {
-    // Re-initialize to get a fresh authorization URL
+  if (existingPending && existingPending.authorizationUrl) {
+    return success(
+      res,
+      {
+        reference: existingPending.reference,
+        authorizationUrl: existingPending.authorizationUrl,
+        accessCode: existingPending.accessCode,
+        reused: true,
+      },
+      "Existing payment session reused",
+    );
   }
 
   const result = await initializePayment({
@@ -64,6 +105,7 @@ async function initPayment(req, res) {
     shipmentId,
     amountNaira: shipment.quotedPrice,
     email,
+    idempotencyKey: idempotencyKey || null,
     metadata: {
       trackingNumber: shipment.trackingNumber,
       recipientCity: shipment.recipientCity,
@@ -71,7 +113,7 @@ async function initPayment(req, res) {
   });
 
   // Sprint 7: Log REFUND_POLICY consent (fire-and-forget)
-  recordConsent(userId, 'REFUND_POLICY', req);
+  recordConsent(userId, "REFUND_POLICY", req);
 
   return success(res, result, "Payment initialized");
 }
@@ -197,7 +239,10 @@ async function paystackCallback(req, res) {
     return res.redirect(dest);
   } catch (err) {
     // Log the real reason so it appears in Vercel function logs
-    console.error(`[paystackCallback] verifyPayment failed for ref=${ref}:`, err.message);
+    console.error(
+      `[paystackCallback] verifyPayment failed for ref=${ref}:`,
+      err.message,
+    );
     // Still send the reference so the frontend can retry verification itself
     const dest = frontendCallback
       ? `${frontendCallback}?reference=${ref}&status=failed&reason=${encodeURIComponent(err.message || "unknown")}`
@@ -399,24 +444,29 @@ async function dismissFailedWebhook(req, res) {
 // needs to record the payment manually without going through Paystack.
 async function markAsPaid(req, res) {
   const { shipmentId } = req.params;
-  const { method = 'MANUAL', reference, notes } = req.body;
+  const { method = "MANUAL", reference, notes } = req.body;
   const adminId = req.user.id;
 
   const shipment = await prisma.shipment.findFirst({
     where: { id: shipmentId },
-    include: { customer: { select: { id: true, email: true, firstName: true, lastName: true } } },
+    include: {
+      customer: {
+        select: { id: true, email: true, firstName: true, lastName: true },
+      },
+    },
   });
-  if (!shipment) throw new ApiError(404, 'Shipment not found');
-  if (shipment.paymentStatus === 'PAID') {
-    throw new ApiError(400, 'This shipment is already marked as paid');
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+  if (shipment.paymentStatus === "PAID") {
+    throw new ApiError(400, "This shipment is already marked as paid");
   }
 
-  const manualRef = reference || `MANUAL-${Date.now().toString(36).toUpperCase()}`;
+  const manualRef =
+    reference || `MANUAL-${Date.now().toString(36).toUpperCase()}`;
 
   // Create or update the payment record
   const existing = await prisma.payment.findFirst({
     where: { shipmentId, userId: shipment.customerId },
-    orderBy: { createdAt: 'desc' },
+    orderBy: { createdAt: "desc" },
   });
 
   let payment;
@@ -424,10 +474,10 @@ async function markAsPaid(req, res) {
     payment = await prisma.payment.update({
       where: { id: existing.id },
       data: {
-        status: 'PAID',
-        channel: 'manual',
+        status: "PAID",
+        channel: "manual",
         paidAt: new Date(),
-        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || 'N/A'}`,
+        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || "N/A"}`,
         ...(reference ? { reference: manualRef } : {}),
       },
     });
@@ -438,11 +488,11 @@ async function markAsPaid(req, res) {
         userId: shipment.customerId,
         shipmentId,
         amountKobo: Math.round((shipment.quotedPrice || 0) * 100),
-        currency: 'NGN',
-        status: 'PAID',
-        channel: 'manual',
+        currency: "NGN",
+        status: "PAID",
+        channel: "manual",
         paidAt: new Date(),
-        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || 'N/A'}`,
+        gatewayResponse: `Manually marked paid by admin. Method: ${method}. Notes: ${notes || "N/A"}`,
       },
     });
   }
@@ -450,22 +500,24 @@ async function markAsPaid(req, res) {
   // Update shipment payment status — PRD: Paid → AWAITING_PICKUP
   await prisma.shipment.update({
     where: { id: shipmentId },
-    data: { paymentStatus: 'PAID', status: 'AWAITING_PICKUP' },
+    data: { paymentStatus: "PAID", status: "AWAITING_PICKUP" },
   });
 
-  return success(res, { payment }, 'Shipment marked as paid successfully');
+  return success(res, { payment }, "Shipment marked as paid successfully");
 }
 
 // ─── WAIVE PAYMENT (Super Admin only) ─────────────────────────────────────────
 // Comps a shipment — marks it paid at ₦0 with reason noted.
 async function waivePayment(req, res) {
   const { shipmentId } = req.params;
-  const { reason = 'Waived by admin' } = req.body;
+  const { reason = "Waived by admin" } = req.body;
 
-  const shipment = await prisma.shipment.findFirst({ where: { id: shipmentId } });
-  if (!shipment) throw new ApiError(404, 'Shipment not found');
-  if (shipment.paymentStatus === 'PAID') {
-    throw new ApiError(400, 'Shipment is already paid');
+  const shipment = await prisma.shipment.findFirst({
+    where: { id: shipmentId },
+  });
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+  if (shipment.paymentStatus === "PAID") {
+    throw new ApiError(400, "Shipment is already paid");
   }
 
   const payment = await prisma.payment.create({
@@ -474,9 +526,9 @@ async function waivePayment(req, res) {
       userId: shipment.customerId,
       shipmentId,
       amountKobo: 0,
-      currency: 'NGN',
-      status: 'PAID',
-      channel: 'waived',
+      currency: "NGN",
+      status: "PAID",
+      channel: "waived",
       paidAt: new Date(),
       gatewayResponse: `Payment waived. Reason: ${reason}`,
     },
@@ -484,12 +536,11 @@ async function waivePayment(req, res) {
 
   await prisma.shipment.update({
     where: { id: shipmentId },
-    data: { paymentStatus: 'PAID', finalPrice: 0 },
+    data: { paymentStatus: "PAID", finalPrice: 0 },
   });
 
-  return success(res, { payment }, 'Payment waived successfully');
+  return success(res, { payment }, "Payment waived successfully");
 }
-
 
 module.exports = {
   initPayment,
