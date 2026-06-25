@@ -1,24 +1,21 @@
-const { verifyAccessToken } = require("../config/jwt");
-const { prisma } = require("../config/db");
-const { ApiError } = require("../utils/ApiError");
+const { verifyAccessToken } = require('../config/jwt');
+const { prisma } = require('../config/db');
+const { ApiError } = require('../utils/ApiError');
 
 // ─── Authenticate ─────────────────────────────────────────────────────────────
 async function authenticate(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    throw new ApiError(401, "Authentication required");
+  if (!header || !header.startsWith('Bearer ')) {
+    throw new ApiError(401, 'Authentication required');
   }
 
-  const token = header.split(" ")[1];
+  const token = header.split(' ')[1];
 
   let decoded;
   try {
     decoded = verifyAccessToken(token);
   } catch (err) {
-    throw new ApiError(
-      401,
-      err.name === "TokenExpiredError" ? "Token expired" : "Invalid token",
-    );
+    throw new ApiError(401, err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token');
   }
 
   const user = await prisma.user.findUnique({
@@ -31,6 +28,7 @@ async function authenticate(req, res, next) {
       lastName: true,
       role: true,
       adminSubRole: true,
+      masterId: true,       // org membership
       isActive: true,
       isEmailVerified: true,
       twoFactorEnabled: true,
@@ -38,8 +36,8 @@ async function authenticate(req, res, next) {
     },
   });
 
-  if (!user) throw new ApiError(401, "User not found");
-  if (!user.isActive) throw new ApiError(403, "Account suspended");
+  if (!user) throw new ApiError(401, 'User not found');
+  if (!user.isActive) throw new ApiError(403, 'Account suspended');
 
   req.user = user;
   next();
@@ -50,30 +48,30 @@ async function authenticate(req, res, next) {
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
-      throw new ApiError(403, "Insufficient permissions");
+      throw new ApiError(403, 'Insufficient permissions');
     }
     next();
   };
 }
 
 function requireAdmin(req, res, next) {
-  if (req.user.role !== "ADMIN") {
-    throw new ApiError(403, "Admin access required");
+  if (req.user.role !== 'ADMIN') {
+    throw new ApiError(403, 'Admin access required');
   }
   next();
 }
 
 function requireSuperAdmin(req, res, next) {
-  if (req.user.role !== "ADMIN" || req.user.adminSubRole !== "SUPER_ADMIN") {
-    throw new ApiError(403, "Super admin access required");
+  if (req.user.role !== 'ADMIN' || req.user.adminSubRole !== 'SUPER_ADMIN') {
+    throw new ApiError(403, 'Super admin access required');
   }
   next();
 }
 
 // Covers any ADMIN-role user — used for generic read-only admin views
 function requireLogisticsOrAbove(req, res, next) {
-  if (req.user.role !== "ADMIN") {
-    throw new ApiError(403, "Admin access required");
+  if (req.user.role !== 'ADMIN') {
+    throw new ApiError(403, 'Admin access required');
   }
   next();
 }
@@ -94,15 +92,15 @@ function requireLogisticsOrAbove(req, res, next) {
 //   3. ROLE_ADMIN with matching capability flag → pass
 //   4. Otherwise → 403
 
-const SUPER_COMPAT = ["SUPER_ADMIN", "LOGISTICS_MANAGER"];
+const SUPER_COMPAT = ['SUPER_ADMIN', 'LOGISTICS_MANAGER'];
 
 // Map each named sub-role to its equivalent capability flag.
 // When a ROLE_ADMIN has this capability, they can do what the named role does.
 const SUBROLE_TO_CAPABILITY = {
-  ROLE_DISPATCHER: "canManageShipments",
-  ROLE_FINANCE: "canManageInvoices",
-  ROLE_AGENT: "canManageTickets",
-  ROLE_MASTER: "canManageOrganization",
+  ROLE_DISPATCHER: 'canManageShipments',
+  ROLE_FINANCE:    'canManageInvoices',
+  ROLE_AGENT:      'canManageTickets',
+  ROLE_MASTER:     'canManageOrganization',
 };
 
 /**
@@ -112,8 +110,7 @@ const SUBROLE_TO_CAPABILITY = {
  */
 function requireSubRole(...subRoles) {
   return async (req, res, next) => {
-    if (req.user.role !== "ADMIN")
-      throw new ApiError(403, "Admin access required");
+    if (req.user.role !== 'ADMIN') throw new ApiError(403, 'Admin access required');
 
     // SUPER_ADMIN and LOGISTICS_MANAGER bypass everything
     if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
@@ -122,20 +119,20 @@ function requireSubRole(...subRoles) {
     if (subRoles.includes(req.user.adminSubRole)) return next();
 
     // ROLE_ADMIN: check if they have the equivalent capability for any of the required sub-roles
-    if (req.user.adminSubRole === "ROLE_ADMIN") {
+    if (req.user.adminSubRole === 'ROLE_ADMIN') {
       const requiredCaps = subRoles
-        .map((r) => SUBROLE_TO_CAPABILITY[r])
+        .map(r => SUBROLE_TO_CAPABILITY[r])
         .filter(Boolean);
 
       if (requiredCaps.length > 0) {
         const perm = await prisma.adminRolePermission.findUnique({
           where: { userId: req.user.id },
         });
-        if (perm && requiredCaps.some((cap) => perm[cap])) return next();
+        if (perm && requiredCaps.some(cap => perm[cap])) return next();
       }
     }
 
-    throw new ApiError(403, `Access requires one of: ${subRoles.join(", ")}`);
+    throw new ApiError(403, `Access requires one of: ${subRoles.join(', ')}`);
   };
 }
 
@@ -148,8 +145,7 @@ function requireSubRole(...subRoles) {
  */
 function requireCapability(capability) {
   return async (req, res, next) => {
-    if (req.user.role !== "ADMIN")
-      throw new ApiError(403, "Admin access required");
+    if (req.user.role !== 'ADMIN') throw new ApiError(403, 'Admin access required');
 
     // SUPER_ADMIN and LOGISTICS_MANAGER bypass all capability checks
     if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
@@ -157,7 +153,7 @@ function requireCapability(capability) {
     // Named sub-roles (DISPATCHER, FINANCE, etc.) do NOT have capabilities
     // unless they are also assigned ROLE_ADMIN with the flag.
     // Check AdminRolePermission for ROLE_ADMIN only.
-    if (req.user.adminSubRole !== "ROLE_ADMIN") {
+    if (req.user.adminSubRole !== 'ROLE_ADMIN') {
       throw new ApiError(403, `You don't have the "${capability}" capability`);
     }
 
@@ -173,47 +169,58 @@ function requireCapability(capability) {
 }
 
 // ─── Shorthand capability guards ──────────────────────────────────────────────
-const requireRateManagement = requireCapability("canManageRates");
-const requireUserManagement = requireCapability("canManageUsers");
-const requireTicketManagement = requireCapability("canManageTickets");
-const requireInvoiceAccess = requireCapability("canManageInvoices");
-const requireAnalyticsAccess = requireCapability("canViewAnalytics");
-const requireAuditLogAccess = requireCapability("canViewAuditLogs");
-const requireBulkNotify = requireCapability("canBulkNotify");
-const requireClaimsAccess = requireCapability("canManageClaims");
-const requireSurchargeManagement = requireCapability("canManageSurcharges");
-const requirePromoManagement = requireCapability("canManagePromos");
+const requireRateManagement   = requireCapability('canManageRates');
+const requireUserManagement   = requireCapability('canManageUsers');
+const requireTicketManagement = requireCapability('canManageTickets');
+const requireInvoiceAccess    = requireCapability('canManageInvoices');
+const requireAnalyticsAccess  = requireCapability('canViewAnalytics');
+const requireAuditLogAccess   = requireCapability('canViewAuditLogs');
+const requireBulkNotify       = requireCapability('canBulkNotify');
+const requireClaimsAccess     = requireCapability('canManageClaims');
+const requireSurchargeManagement = requireCapability('canManageSurcharges');
+const requirePromoManagement     = requireCapability('canManagePromos');
 
+// ─── Gap 5: 2FA session guard for sensitive routes (e.g. Invoices) ───────────
+//
+// Usage:  router.use(authenticate, requireRecentMFA());
+//
+// Rules:
+//   • If the user does NOT have 2FA enabled → pass through (they can't have a
+//     mfaVerifiedAt stamp but also have no second factor to complete).
+//   • If the user HAS 2FA enabled → their token MUST contain mfaVerifiedAt and
+//     that timestamp must be within MAX_MFA_AGE_HOURS hours.
+//   • If the check fails → 403 with a structured error so the frontend can
+//     redirect to the OTP page rather than showing a generic error.
+//
 const MAX_MFA_AGE_HOURS = parseInt(process.env.MFA_SESSION_HOURS) || 8;
 
 function requireRecentMFA() {
   return async (req, res, next) => {
     const user = req.user;
-    if (!user) return next(new ApiError(401, "Authentication required"));
+    if (!user) return next(new ApiError(401, 'Authentication required'));
 
     // Users without 2FA enabled are not subject to this gate
     if (!user.twoFactorEnabled) return next();
 
     // Re-read the raw token to get mfaVerifiedAt from its claims
     const header = req.headers.authorization;
-    if (!header || !header.startsWith("Bearer ")) {
-      return next(new ApiError(401, "Authentication required"));
+    if (!header || !header.startsWith('Bearer ')) {
+      return next(new ApiError(401, 'Authentication required'));
     }
 
-    const { verifyAccessToken } = require("../config/jwt");
+    const { verifyAccessToken } = require('../config/jwt');
     let claims;
     try {
-      claims = verifyAccessToken(header.split(" ")[1]);
+      claims = verifyAccessToken(header.split(' ')[1]);
     } catch {
-      return next(new ApiError(401, "Invalid or expired token"));
+      return next(new ApiError(401, 'Invalid or expired token'));
     }
 
     if (!claims.mfaVerifiedAt) {
       return res.status(403).json({
         success: false,
-        code: "MFA_REQUIRED",
-        message:
-          "This page requires two-factor authentication. Please verify your identity.",
+        code: 'MFA_REQUIRED',
+        message: 'This page requires two-factor authentication. Please verify your identity.',
       });
     }
 
@@ -224,7 +231,7 @@ function requireRecentMFA() {
     if (ageMs > maxMs) {
       return res.status(403).json({
         success: false,
-        code: "MFA_EXPIRED",
+        code: 'MFA_EXPIRED',
         message: `Your two-factor session has expired. Please re-verify to access this page (sessions last ${MAX_MFA_AGE_HOURS} hours).`,
       });
     }
@@ -236,20 +243,14 @@ function requireRecentMFA() {
 // ─── Optional Auth (for public + private combined routes) ─────────────────────
 async function optionalAuth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) return next();
+  if (!header || !header.startsWith('Bearer ')) return next();
 
   try {
-    const token = header.split(" ")[1];
+    const token = header.split(' ')[1];
     const decoded = verifyAccessToken(token);
     const user = await prisma.user.findUnique({
       where: { id: decoded.sub },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        adminSubRole: true,
-        isActive: true,
-      },
+      select: { id: true, email: true, role: true, adminSubRole: true, isActive: true },
     });
     if (user && user.isActive) req.user = user;
   } catch (_) {

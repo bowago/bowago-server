@@ -116,19 +116,23 @@ async function acceptInvite(req, res) {
   const bcrypt = require('bcryptjs');
   const passwordHash = await bcrypt.hash(password, 12);
 
-  const isAdminRole = ['SUPER_ADMIN', 'LOGISTICS_MANAGER', 'ROLE_ADMIN', 'ROLE_AGENT'].includes(invite.role);
+  // All org-invited roles are ADMIN-tier in the platform system
+  const isAdminRole = ['SUPER_ADMIN', 'LOGISTICS_MANAGER', 'ROLE_ADMIN', 'ROLE_AGENT',
+    'ROLE_DISPATCHER', 'ROLE_FINANCE', 'ROLE_MASTER', 'ROLE_USER'].includes(invite.role);
 
   const user = await prisma.user.create({
     data: {
-      email:         invite.email,
+      email:           invite.email,
       firstName,
       lastName,
-      phone:         phone || null,
+      phone:           phone || null,
       passwordHash,
-      role:          isAdminRole ? 'ADMIN' : 'CUSTOMER',
-      adminSubRole:  invite.role,
+      role:            isAdminRole ? 'ADMIN' : 'CUSTOMER',
+      adminSubRole:    invite.role,
+      // Org membership: stamp masterId so shipments/invoices can be scoped to this org
+      masterId:        invite.invitedBy,
       isEmailVerified: true, // Invite flow skips email verification
-      authProvider:  'EMAIL',
+      authProvider:    'EMAIL',
     },
   });
 

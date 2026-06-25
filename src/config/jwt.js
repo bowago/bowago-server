@@ -1,20 +1,18 @@
-const jwt = require("jsonwebtoken");
-const { randomUUID } = require("crypto");
-const { prisma } = require("./db");
+const jwt = require('jsonwebtoken');
+const { randomUUID } = require('crypto'); // Node built-in — no uuid package needed
+const { prisma } = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || "30d";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
 
 function signAccessToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
 function signRefreshToken(payload) {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, {
-    expiresIn: JWT_REFRESH_EXPIRES_IN,
-  });
+  return jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
 }
 
 function verifyAccessToken(token) {
@@ -25,17 +23,13 @@ function verifyRefreshToken(token) {
   return jwt.verify(token, JWT_REFRESH_SECRET);
 }
 
-async function generateTokenPair(
-  user,
-  deviceInfo,
-  ipAddress,
-  mfaVerifiedAt = null,
-) {
+async function generateTokenPair(user, deviceInfo, ipAddress, mfaVerifiedAt = null) {
   const payload = {
-    sub: user.id,
-    email: user.email,
-    role: user.role,
+    sub:          user.id,
+    email:        user.email,
+    role:         user.role,
     adminSubRole: user.adminSubRole || null,
+    masterId:     user.masterId     || null,  // org membership — null for BowaGO staff
     mfaVerifiedAt: mfaVerifiedAt ? mfaVerifiedAt.toISOString() : null,
   };
 

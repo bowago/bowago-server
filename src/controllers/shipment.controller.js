@@ -771,15 +771,53 @@ async function cancelShipment(req, res) {
 async function adminListShipments(req, res) {
   const { page, limit, skip } = getPagination(req.query);
   const { status, search, assignedTo, fromDate, toDate } = req.query;
+  const subRole = req.user.adminSubRole;
 
   const statusFilter = (() => {
     if (!status) return undefined;
-    // Support `?status=A,B,C` or repeated `?status=A&status=B`
     const values = Array.isArray(status) ? status : String(status).split(",");
     return values.length > 1 ? { in: values } : values[0];
   })();
 
+  // ── Org-scoped filtering (Sprint 8 team feature) ─────────────────────────
+  // ROLE_DISPATCHER and ROLE_FINANCE see only their org's shipments:
+  //   → their own shipments (they created) + shipments by other team members
+  //     under the same master.
+  // ROLE_MASTER sees all shipments created by any member of their org.
+  // SUPER_ADMIN / LOGISTICS_MANAGER / ROLE_ADMIN → see everything.
+  let orgFilter = {};
+
+  const ORG_ROLES = ['ROLE_DISPATCHER', 'ROLE_FINANCE', 'ROLE_MASTER', 'ROLE_USER'];
+
+  if (ORG_ROLES.includes(subRole)) {
+    // Find all user IDs who belong to the same organisation
+    // For ROLE_MASTER: masterId is the master themselves
+    // For team members: masterId stored on their user record points to the master
+    const masterId = subRole === 'ROLE_MASTER'
+      ? req.user.id
+      : req.user.masterId;
+
+    if (masterId) {
+      // Get all org members (master + their team)
+      const orgMembers = await prisma.user.findMany({
+        where: {
+          OR: [
+            { id: masterId },                 // the master
+            { masterId: masterId },            // team members
+          ],
+        },
+        select: { id: true },
+      });
+      const memberIds = orgMembers.map(u => u.id);
+      orgFilter = { customerId: { in: memberIds } };
+    } else {
+      // No org link found — show only their own shipments
+      orgFilter = { customerId: req.user.id };
+    }
+  }
+
   const where = {
+    ...orgFilter,
     ...(statusFilter && { status: statusFilter }),
     ...(assignedTo && { assignedToId: assignedTo }),
     ...(fromDate || toDate

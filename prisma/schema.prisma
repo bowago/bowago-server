@@ -187,6 +187,11 @@ model User {
   companyCountry   String?
   companyZip       String?
 
+  // ─── Organisation membership (Sprint 8 team feature) ─────────────────────
+  // Set when a team member accepts an org invite. Points to the ROLE_MASTER
+  // user who invited them. Used to scope shipments, invoices, etc. to the org.
+  masterId         String?   // FK → User.id of the ROLE_MASTER who owns the org
+
   addresses           Address[]
   savedCards          SavedCard[]
   shipments           Shipment[]           @relation("CustomerShipments")
@@ -638,11 +643,6 @@ model Payment {
   refundedAt        DateTime?
   refundReference   String?
   refundAmountKobo  Int?
-
-  // Gap 1: idempotency key + stored authorization URL for reuse on duplicate requests
-  idempotencyKey    String?   // client-supplied UUID; unique per 60-min window
-  authorizationUrl  String?   // Paystack authorization_url for this pending payment
-  accessCode        String?   // Paystack access_code for inline payment widget
 
   metadata          Json?
 
