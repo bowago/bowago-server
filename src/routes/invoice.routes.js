@@ -1,6 +1,11 @@
-const router = require('express').Router();
-const invoiceController = require('../controllers/invoice.controller');
-const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess, requireRecentMFA } = require('../middleware/auth');
+const router = require("express").Router();
+const invoiceController = require("../controllers/invoice.controller");
+const {
+  authenticate,
+  requireLogisticsOrAbove,
+  requireInvoiceAccess,
+  requireRecentMFA,
+} = require("../middleware/auth");
 
 /**
  * @swagger
@@ -9,8 +14,9 @@ const { authenticate, requireLogisticsOrAbove, requireInvoiceAccess, requireRece
  *   description: "Sprint 3 - Invoice management, PDF downloads, shipping labels, and financial overview"
  */
 
-// Gap 5: All invoice endpoints require authentication + recent 2FA verification
-// (users without 2FA enabled pass through requireRecentMFA automatically)
+// Gap 5: All invoice endpoints require authentication + recent 2FA verification.
+// 2FA is mandatory here — users who have not enabled 2FA are blocked with
+// MFA_SETUP_REQUIRED rather than allowed through, per PRD.
 router.use(authenticate);
 router.use(requireRecentMFA());
 
@@ -70,7 +76,7 @@ router.use(requireRecentMFA());
  *       401:
  *         description: Unauthorized
  */
-router.get('/my', invoiceController.myInvoices);
+router.get("/my", invoiceController.myInvoices);
 
 /**
  * @swagger
@@ -120,10 +126,13 @@ router.get('/my', invoiceController.myInvoices);
  *         description: Admin access required
  */
 
-router.get('/my-summary', authenticate, invoiceController.myInvoiceSummary);
+router.get("/my-summary", authenticate, invoiceController.myInvoiceSummary);
 
-router.get('/financial-overview', requireInvoiceAccess, invoiceController.financialOverview); // PRD: ROLE_FINANCE / canManageInvoices
-
+router.get(
+  "/financial-overview",
+  requireInvoiceAccess,
+  invoiceController.financialOverview,
+); // PRD: ROLE_FINANCE / canManageInvoices
 
 /**
  * @swagger
@@ -160,7 +169,7 @@ router.get('/financial-overview', requireInvoiceAccess, invoiceController.financ
  *       403:
  *         description: Admin access required
  */
-router.get('/admin', requireInvoiceAccess, invoiceController.adminListInvoices); // PRD: ROLE_FINANCE / canManageInvoices
+router.get("/admin", requireInvoiceAccess, invoiceController.adminListInvoices); // PRD: ROLE_FINANCE / canManageInvoices
 
 /**
  * @swagger
@@ -183,7 +192,7 @@ router.get('/admin', requireInvoiceAccess, invoiceController.adminListInvoices);
  *       404:
  *         description: Invoice not found
  */
-router.get('/:paymentId', invoiceController.getInvoice);
+router.get("/:paymentId", invoiceController.getInvoice);
 
 /**
  * @swagger
@@ -213,7 +222,7 @@ router.get('/:paymentId', invoiceController.getInvoice);
  *       404:
  *         description: Invoice not found
  */
-router.get('/:paymentId/download', invoiceController.downloadInvoicePDF);
+router.get("/:paymentId/download", invoiceController.downloadInvoicePDF);
 
 /**
  * @swagger
@@ -237,7 +246,7 @@ router.get('/:paymentId/download', invoiceController.downloadInvoicePDF);
  *       404:
  *         description: Invoice not found
  */
-router.post('/:paymentId/email', invoiceController.emailInvoice);
+router.post("/:paymentId/email", invoiceController.emailInvoice);
 
 /**
  * @swagger
