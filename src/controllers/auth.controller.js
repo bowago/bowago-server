@@ -243,15 +243,19 @@ async function setup2FA(req, res) {
   }
 
   const user = req.user;
-  if (user.twoFactorEnabled) {
-    return success(
-      res,
-      { alreadyEnabled: true },
-      "Two-factor authentication is already enabled",
-    );
-  }
+  // FIX: this used to short-circuit here with NO OTP sent whenever
+  // twoFactorEnabled was already true — including for users whose current
+  // session token has no (or an expired) mfaVerifiedAt claim. That left them
+  // with no way to refresh their MFA session and pass requireRecentMFA on
+  // pages like Invoices, short of disabling and re-enabling 2FA entirely.
+  // Now: still send a fresh OTP and let it flow through to verify2FA, which
+  // mints a new token with mfaVerifiedAt set. `alreadyEnabled` is still
+  // returned so the frontend can show "Verify to continue" copy instead of
+  // "Enable 2FA" copy.
+  const alreadyEnabled = !!user.twoFactorEnabled;
+  const effectiveMethod = alreadyEnabled ? user.twoFactorMethod || method : method;
 
-  if (method === "SMS") {
+  if (effectiveMethod === "SMS") {
     if (!isSmsConfigured()) {
       throw new ApiError(
         400,
@@ -268,8 +272,8 @@ async function setup2FA(req, res) {
       await sendOtp(user.id, user.phone, "TWO_FACTOR_SETUP", "SMS");
       return success(
         res,
-        { method: "SMS", deliveryChannel: "SMS" },
-        `Verification code sent to ${maskPhone(user.phone)}. Enter it to confirm 2FA setup.`,
+        { method: "SMS", deliveryChannel: "SMS", alreadyEnabled },
+        `Verification code sent to ${maskPhone(user.phone)}. Enter it to ${alreadyEnabled ? "verify your session" : "confirm 2FA setup"}.`,
       );
     } catch (smsErr) {
       // SMS failed — auto-fallback to email per PRD Sprint 2
@@ -277,7 +281,7 @@ async function setup2FA(req, res) {
         await sendOtp(user.id, user.email, "TWO_FACTOR_SETUP", "EMAIL");
         return success(
           res,
-          { method: "SMS", deliveryChannel: "EMAIL", smsFallback: true },
+          { method: "SMS", deliveryChannel: "EMAIL", smsFallback: true, alreadyEnabled },
           "SMS unavailable — verification code sent to your email instead. Enter it to confirm 2FA setup.",
         );
       } catch (emailErr) {
@@ -292,8 +296,8 @@ async function setup2FA(req, res) {
   await sendOtp(user.id, user.email, "TWO_FACTOR_SETUP", "EMAIL");
   return success(
     res,
-    { method: "EMAIL", deliveryChannel: "EMAIL" },
-    "Verification code sent to your email. Enter it to confirm 2FA setup.",
+    { method: "EMAIL", deliveryChannel: "EMAIL", alreadyEnabled },
+    `Verification code sent to your email. Enter it to ${alreadyEnabled ? "verify your session" : "confirm 2FA setup"}.`,
   );
 }
 
@@ -304,7 +308,7 @@ async function verify2FA(req, res) {
 
   await verifyOtp(req.user.id, otp, "TWO_FACTOR_SETUP");
 
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: req.user.id },
     data: {
       twoFactorEnabled: true,
@@ -312,9 +316,23 @@ async function verify2FA(req, res) {
     },
   });
 
+  // FIX: requireRecentMFA() (used to gate the Invoices page) checks for an
+  // `mfaVerifiedAt` claim on the JWT itself, not just the DB flag. The old
+  // code never reissued the user's token after enabling 2FA, so their
+  // existing session token had no mfaVerifiedAt claim and the Invoices page
+  // kept demanding 2FA even though it had just been enabled. Also returning
+  // the updated user object so the frontend can sync redux state immediately
+  // instead of relying on a stale value until next login/profile refetch.
+  const tokens = await generateTokenPair(
+    updatedUser,
+    req.headers["user-agent"],
+    req.ip,
+    new Date(),
+  );
+
   return success(
     res,
-    { twoFactorEnabled: true },
+    { user: safeUser(updatedUser), ...tokens, twoFactorEnabled: true },
     "Two-factor authentication enabled successfully",
   );
 }
@@ -328,14 +346,14 @@ async function disable2FA(req, res) {
   const isValid = await bcrypt.compare(password, user.passwordHash);
   if (!isValid) throw new ApiError(401, "Incorrect password");
 
-  await prisma.user.update({
+  const updatedUser = await prisma.user.update({
     where: { id: req.user.id },
     data: { twoFactorEnabled: false },
   });
 
   return success(
     res,
-    { twoFactorEnabled: false },
+    { user: safeUser(updatedUser), twoFactorEnabled: false },
     "Two-factor authentication disabled",
   );
 }

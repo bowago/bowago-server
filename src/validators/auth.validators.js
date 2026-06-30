@@ -57,6 +57,28 @@ const appleAuthSchema = Joi.object({
   }).optional(),
 });
 
+// ─── 2FA — these four were referenced by auth.routes.js but never defined,
+// so validateBody(undefined) threw a raw TypeError on every 2FA request,
+// which the global error handler masked as a generic "Something went
+// wrong" message. This was the actual cause of the 2FA setup error.
+const login2FASchema = Joi.object({
+  email: Joi.string().email().lowercase().required(),
+  otp: Joi.string().length(6).pattern(/^\d+$/).required(),
+});
+
+const setup2FASchema = Joi.object({
+  method: Joi.string().valid('EMAIL', 'SMS').required(),
+});
+
+const verify2FASchema = Joi.object({
+  otp: Joi.string().length(6).pattern(/^\d+$/).required(),
+  method: Joi.string().valid('EMAIL', 'SMS').optional(),
+});
+
+const disable2FASchema = Joi.object({
+  password: Joi.string().required(),
+});
+
 module.exports = {
   registerSchema,
   loginSchema,
@@ -67,4 +89,8 @@ module.exports = {
   changePasswordSchema,
   googleAuthSchema,
   appleAuthSchema,
+  login2FASchema,
+  setup2FASchema,
+  verify2FASchema,
+  disable2FASchema,
 };

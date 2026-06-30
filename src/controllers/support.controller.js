@@ -119,14 +119,20 @@ async function myTickets(req, res) {
       include: {
         messages: { orderBy: { createdAt: "desc" }, take: 1 },
         assignedTo: { select: { firstName: true, lastName: true } },
+        shipment: { select: { trackingNumber: true } },
       },
     }),
     prisma.supportTicket.count({ where }),
   ]);
 
+  const flattened = tickets.map((t) => ({
+    ...t,
+    trackingNumber: t.shipment?.trackingNumber ?? null,
+  }));
+
   return res.json({
     success: true,
-    data: { tickets },
+    data: { tickets: flattened },
     meta: buildMeta(total, page, limit),
   });
 }
@@ -152,6 +158,7 @@ async function getTicket(req, res) {
         },
       },
       assignedTo: { select: { id: true, firstName: true, lastName: true } },
+      shipment: { select: { trackingNumber: true, status: true } },
     },
   });
 
@@ -160,6 +167,15 @@ async function getTicket(req, res) {
   if (req.user.role === "CUSTOMER" && ticket.customerId !== req.user.id) {
     throw new ApiError(403, "Access denied");
   }
+
+  const flatTicket = {
+    ...ticket,
+    username: ticket.customer
+      ? `${ticket.customer.firstName} ${ticket.customer.lastName}`.trim()
+      : undefined,
+    email: ticket.customer?.email,
+    trackingNumber: ticket.shipment?.trackingNumber ?? null,
+  };
 
   // Sprint 6: Customer context card — last 5 shipments of this customer
   let customerContext = null;
@@ -191,7 +207,7 @@ async function getTicket(req, res) {
     customerContext = { recentShipments, recentPayments };
   }
 
-  return success(res, { ticket, customerContext });
+  return success(res, { ticket: flatTicket, customerContext });
 }
 
 // ─── Reply to ticket ──────────────────────────────────────────────────────────
@@ -267,15 +283,28 @@ async function listTickets(req, res) {
           select: { id: true, firstName: true, lastName: true, email: true },
         },
         assignedTo: { select: { id: true, firstName: true, lastName: true } },
+        shipment: { select: { trackingNumber: true } },
         messages: { orderBy: { createdAt: "desc" }, take: 1 },
       },
     }),
     prisma.supportTicket.count({ where }),
   ]);
 
+  // FIX: frontend (TicketColumns) expects flat `username`/`email`/`trackingNumber`
+  // fields. The backend was only ever returning the raw `shipmentId` (no
+  // relation existed to resolve it into a trackingNumber) and a nested
+  // `customer` object the table never read — so "User" and "Tracking No."
+  // always rendered blank. Flattening here is the lowest-risk fix.
+  const flattened = tickets.map((t) => ({
+    ...t,
+    username: t.customer ? `${t.customer.firstName} ${t.customer.lastName}`.trim() : undefined,
+    email: t.customer?.email,
+    trackingNumber: t.shipment?.trackingNumber ?? null,
+  }));
+
   return res.json({
     success: true,
-    data: { tickets },
+    data: { tickets: flattened },
     meta: buildMeta(total, page, limit),
   });
 }

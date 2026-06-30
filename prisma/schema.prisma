@@ -472,6 +472,11 @@ model Shipment {
   claims           Claim[]
   priceAdjustments PriceAdjustment[]
   quote            Quote?
+  // FIX: SupportTicket.shipmentId had no relation back to Shipment, so
+  // admin/customer ticket views could never resolve a tracking number —
+  // they only ever had the raw shipmentId. Added so listTickets/getTicket
+  // can `include: { shipment: { select: { trackingNumber: true } } }`.
+  supportTickets   SupportTicket[]
 
   pickupLat           Float?
   pickupLng           Float?
@@ -640,6 +645,17 @@ model Payment {
   cardLast4         String?
   cardBank          String?
 
+  // FIX: these three fields were already being written/read by
+  // paystack.service.js (initializePayment) and payment.controller.js
+  // (idempotency lookup) but were missing from the schema. Every "Pay"
+  // click was crashing with a PrismaClientValidationError ("Unknown
+  // argument `authorizationUrl`"), which the global error handler masks
+  // as "Something went wrong on our end." — this was the bug behind the
+  // screenshot.
+  authorizationUrl  String?
+  accessCode        String?
+  idempotencyKey    String?
+
   refundedAt        DateTime?
   refundReference   String?
   refundAmountKobo  Int?
@@ -673,6 +689,7 @@ model SupportTicket {
 
   customer     User            @relation("TicketCustomer", fields: [customerId], references: [id])
   assignedTo   User?           @relation("TicketAgent", fields: [assignedToId], references: [id])
+  shipment     Shipment?       @relation(fields: [shipmentId], references: [id])
   messages     TicketMessage[]
 
   createdAt    DateTime        @default(now())

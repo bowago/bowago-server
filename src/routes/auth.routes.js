@@ -22,6 +22,16 @@ const {
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  // FIX: default key is req.ip alone. Combined with trust proxy now being
+  // set correctly, this is no longer "all users share one bucket" — but on
+  // top of that, key by IP+email together so that even users genuinely
+  // sharing one IP (office network, campus wifi, carrier-grade NAT — common
+  // in Nigeria) don't get locked out by someone else mistyping a different
+  // account's password.
+  keyGenerator: (req) => {
+    const email = (req.body?.email || "").toLowerCase().trim();
+    return email ? `${req.ip}:${email}` : req.ip;
+  },
   message: {
     success: false,
     message: "Too many auth attempts. Try again in 15 minutes.",

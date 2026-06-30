@@ -10,6 +10,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
 const swaggerSpec = require("./config/swagger");
 const { errorHandler, notFound } = require("./middleware/error");
 
@@ -36,6 +37,20 @@ const quoteRoutes = require("./routes/quote.routes");
 const adminRoleRoutes = require("./routes/adminRole.routes");
 
 const app = express();
+
+// FIX: this app runs behind a reverse proxy (Render/Railway/Vercel/nginx,
+// etc.). Without trusting the proxy, Express's req.ip resolves to the
+// proxy's own address for EVERY request, not the real client IP. Every
+// rate limiter below is keyed by req.ip by default — so without this line,
+// all users share a single rate-limit bucket, and one user's failed login
+// attempts (or any other rate-limited action) locks out the entire app for
+// everyone. This was reported as "Too many attempts" blocking unrelated
+// users after one person mistyped a password a few times.
+// "1" trusts exactly one hop (the platform's own edge proxy) — the
+// standard, safe setting for single-proxy deployments (Render, Railway,
+// Heroku, a single nginx in front). If deployed behind multiple chained
+// proxies/CDNs, this may need to be increased accordingly.
+app.set("trust proxy", 1);
 
 // ─── Security & Utilities ─────────────────────────────────────────────────────
 app.use(helmet());
@@ -160,11 +175,45 @@ app.get(["/api-docs", "/api-docs/"], (req, res) => {
 });
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
+// FIX: this was previously keyed by req.ip ONLY, with a ceiling of 100
+// requests per 15 minutes, applied globally to every /api/* call. Two
+// things made this collapse multiple unrelated users into a single bucket:
+//   1. Any deployment with more than one proxy hop (CDN + platform LB, for
+//      example) can resolve req.ip to the same edge node for many different
+//      real users even with `trust proxy` set, so they all shared one
+//      counter.
+//   2. Even for a single correctly-identified user, normal app usage
+//      (30s tracking poll, notification poll, dashboard queries) burns
+//      through 100 requests in well under 15 minutes on its own — so one
+//      person mistyping a password a few times (each failed attempt is
+//      itself a request against this same global counter) was enough to
+//      push a shared IP bucket over the edge for everyone behind it.
+// Fix: key by the authenticated user's id when a token is present (each
+// logged-in user gets their own bucket no matter what IP/proxy hop they
+// share), fall back to IP only for genuinely anonymous traffic, and raise
+// the ceiling to a level that reflects this app's actual polling volume.
+function rateLimitKey(req) {
+  const header = req.headers.authorization;
+  if (header && header.startsWith("Bearer ")) {
+    try {
+      // Decoded only — not verified — purely to bucket by account. An
+      // invalid/expired token just falls through to the IP-based key,
+      // which is fine since this is abuse-prevention, not auth.
+      const decoded = jwt.decode(header.split(" ")[1]);
+      if (decoded?.sub) return `user:${decoded.sub}`;
+    } catch {
+      // fall through to IP-based key
+    }
+  }
+  return `ip:${req.ip}`;
+}
+
 app.use(
   "/api",
   rateLimit({
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-    max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
+    max: parseInt(process.env.RATE_LIMIT_MAX) || 600,
+    keyGenerator: rateLimitKey,
     message: {
       success: false,
       message: "Too many requests, please try again later.",
