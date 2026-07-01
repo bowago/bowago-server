@@ -1,3 +1,4 @@
+// MUST be the first require
 require("express-async-errors");
 // Only load .env file locally — on Vercel, env vars are injected by the platform
 if (process.env.VERCEL !== "1") {
