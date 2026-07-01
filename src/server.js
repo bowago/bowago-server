@@ -33,23 +33,36 @@ if (process.env.VERCEL !== "1") {
         await prisma.$connect();
         break; // connected — exit retry loop
       } catch (err) {
-        console.warn(`⚠️  DB connect attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
+        console.warn(
+          `[WARN] DB connect attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`,
+        );
         if (attempt === MAX_RETRIES) {
-          console.error("❌ Failed to start server after retries:", err);
+          console.error("[ERROR] Failed to start server after retries:", err);
           process.exit(1);
         }
         await new Promise((r) => setTimeout(r, 3000 * attempt)); // wait 3s, 6s
       }
     }
 
-    console.log("✅ Database connected");
+    console.log("[OK] Database connected");
+
+    // Seed default Business Rules settings so they appear in
+    // Settings → Business Rules immediately, even before a Super Admin
+    // has edited any of them.
+    try {
+      const { seedDefaults } = require("./services/settings.service");
+      await seedDefaults();
+    } catch (err) {
+      console.error("[WARN] Failed to seed default settings:", err.message);
+    }
+
     httpServer.listen(PORT, () => {
       console.log(
-        `🚀 BowaGO API running on port ${PORT} [${process.env.NODE_ENV || "development"}]`,
+        `[READY] BowaGO API running on port ${PORT} [${process.env.NODE_ENV || "development"}]`,
       );
-      console.log(`📖 Swagger docs: http://localhost:${PORT}/api-docs`);
-      console.log(`❤️  Health check: http://localhost:${PORT}/health`);
-      console.log(`🔌 WebSocket (tracking): ws://localhost:${PORT}`);
+      console.log(`[INFO] Swagger docs: http://localhost:${PORT}/api-docs`);
+      console.log(`[INFO] Health check: http://localhost:${PORT}/health`);
+      console.log(`[INFO] WebSocket (tracking): ws://localhost:${PORT}`);
     });
   }
 
@@ -79,12 +92,34 @@ if (process.env.VERCEL !== "1") {
     try {
       const result = await runEscalationJob();
       if (result.escalated > 0) {
-        console.log(`[Escalation] Auto-escalated ${result.escalated} stale ticket(s)`);
+        console.log(
+          `[Escalation] Auto-escalated ${result.escalated} stale ticket(s)`,
+        );
       }
     } catch (err) {
       console.error("[Escalation] Job failed:", err.message);
     }
   }, ESCALATION_INTERVAL_MS);
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ─── Price Adjustment Auto-Cancel Sweep (PRD: 24h timeout → auto-cancel) ──
+  // Interval is configurable via Settings → Business Rules
+  // (price_adjustment.sweep_interval_minutes), read once at boot.
+  const {
+    startPriceAdjustmentScheduler,
+  } = require("./services/priceAdjustmentScheduler.service");
+  startPriceAdjustmentScheduler().catch((err) =>
+    console.error("[priceAdjustmentScheduler] Failed to start:", err.message),
+  );
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ─── SLA Breach Sweep (PRD: auto delay-alert when past estimated delivery) ─
+  const {
+    startSLABreachScheduler,
+  } = require("./services/slaBreachScheduler.service");
+  startSLABreachScheduler().catch((err) =>
+    console.error("[SLABreach] Failed to start:", err.message),
+  );
   // ─────────────────────────────────────────────────────────────────────────
 
   process.on("SIGTERM", async () => {

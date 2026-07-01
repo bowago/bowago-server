@@ -12,6 +12,8 @@ const {
   getPagination,
   buildMeta,
 } = require("../utils/helpers");
+const { earnPoints } = require("../services/loyalty.service");
+const { autoGenerateInvoice } = require("./invoice.controller");
 
 // ─── Sprint 7: Consent helper ─────────────────────────────────────────────────
 async function recordConsent(userId, consentType, req) {
@@ -550,6 +552,24 @@ async function updateShipmentStatus(req, res) {
   });
   socketService.emitShipmentUpdate(updated, timeline);
   socketService.emitNotification(shipment.customerId, notification);
+
+  // ── On DELIVERED: auto-generate invoice + earn loyalty points ─────────────
+  if (status === "DELIVERED") {
+    // Auto-invoice (non-blocking — failure must not affect the status update response)
+    autoGenerateInvoice(updated).catch((err) =>
+      console.error("[AutoInvoice] Failed for shipment", updated.trackingNumber, err.message),
+    );
+
+    // Loyalty points earn
+    const finalPrice = updated.finalPrice ?? updated.quotedPrice;
+    earnPoints({
+      userId:           shipment.customerId,
+      shipmentId:       id,
+      finalPriceNaira:  finalPrice,
+    }).catch((err) =>
+      console.error("[Loyalty] Earn failed for shipment", updated.trackingNumber, err.message),
+    );
+  }
 
   return success(res, { shipment: updated }, "Status updated");
 }

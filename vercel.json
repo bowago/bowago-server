@@ -11,5 +11,19 @@
       "source": "/(.*)",
       "destination": "/api/index"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/v1/cron/sweep-price-adjustments",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/v1/cron/escalate-tickets",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/v1/cron/sla-breach-sweep",
+      "schedule": "0 */2 * * *"
+    }
   ]
 }

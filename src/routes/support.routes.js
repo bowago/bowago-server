@@ -292,7 +292,13 @@ router.delete('/canned-responses/:id', requireTicketManagement, supportControlle
  *       403:
  *         description: Admin access required
  */
-router.get('/kpi', requireAnalyticsAccess, supportController.getAgentKpi); // PRD: canViewAnalytics
+// Agent KPI — agents see their own data; admins with analytics capability see all
+router.get('/kpi', async (req, res, next) => {
+  // ROLE_AGENT: pass through (controller self-scopes to their own data)
+  if (req.user?.adminSubRole === 'ROLE_AGENT') return next();
+  // Everyone else: require canViewAnalytics capability
+  return requireAnalyticsAccess(req, res, next);
+}, supportController.getAgentKpi);
 
 /**
  * @swagger

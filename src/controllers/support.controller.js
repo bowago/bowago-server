@@ -1,4 +1,5 @@
 const { prisma } = require("../config/db");
+const socketService = require("../services/socket.service");
 const { ApiError } = require("../utils/ApiError");
 const {
   success,
@@ -11,26 +12,26 @@ const {
 // PRD: PAYMENT/PRICING → ROLE_FINANCE, TRACKING/DELIVERY → ROLE_DISPATCHER, others → ROLE_AGENT
 async function autoAssignTicket(category) {
   const categoryAgentMap = {
-    PAYMENT:         'ROLE_FINANCE',
-    PRICING_DISPUTE: 'ROLE_FINANCE',
-    TRACKING:        'ROLE_DISPATCHER',
-    DAMAGED_GOODS:   'ROLE_AGENT',
-    DELIVERY_ISSUE:  'ROLE_DISPATCHER',
-    ACCOUNT:         'ROLE_AGENT',
-    OTHER:           'ROLE_AGENT',
+    PAYMENT: "ROLE_FINANCE",
+    PRICING_DISPUTE: "ROLE_FINANCE",
+    TRACKING: "ROLE_DISPATCHER",
+    DAMAGED_GOODS: "ROLE_AGENT",
+    DELIVERY_ISSUE: "ROLE_DISPATCHER",
+    ACCOUNT: "ROLE_AGENT",
+    OTHER: "ROLE_AGENT",
   };
 
-  const requiredSubRole = categoryAgentMap[category] || 'ROLE_AGENT';
+  const requiredSubRole = categoryAgentMap[category] || "ROLE_AGENT";
 
   const agent = await prisma.user.findFirst({
     where: {
-      role: 'ADMIN',
+      role: "ADMIN",
       adminSubRole: requiredSubRole,
       isActive: true,
     },
     orderBy: {
       // Assign to agent with fewest open tickets
-      assignedTickets: { _count: 'asc' },
+      assignedTickets: { _count: "asc" },
     },
   });
 
@@ -55,10 +56,17 @@ async function createTicket(req, res) {
       where: { trackingNumber: trackingNumber.trim().toUpperCase() },
       select: { id: true, customerId: true },
     });
-    if (!shipment) throw new ApiError(404, `No shipment found with tracking number "${trackingNumber}"`);
+    if (!shipment)
+      throw new ApiError(
+        404,
+        `No shipment found with tracking number "${trackingNumber}"`,
+      );
     // Customers can only raise tickets for their own shipments
-    if (req.user.role === 'CUSTOMER' && shipment.customerId !== req.user.id) {
-      throw new ApiError(403, 'You can only raise tickets for your own shipments');
+    if (req.user.role === "CUSTOMER" && shipment.customerId !== req.user.id) {
+      throw new ApiError(
+        403,
+        "You can only raise tickets for your own shipments",
+      );
     }
     resolvedShipmentId = shipment.id;
   }
@@ -257,6 +265,14 @@ async function replyToTicket(req, res) {
     });
   }
 
+  // Sprint 6: Real-time — push new message to everyone in the ticket room
+  socketService.emitTicketMessage(id, message, {
+    id: req.user.id,
+    firstName: req.user.firstName,
+    lastName: req.user.lastName,
+    role: req.user.role,
+  });
+
   return created(res, { message }, "Reply sent");
 }
 
@@ -297,7 +313,9 @@ async function listTickets(req, res) {
   // always rendered blank. Flattening here is the lowest-risk fix.
   const flattened = tickets.map((t) => ({
     ...t,
-    username: t.customer ? `${t.customer.firstName} ${t.customer.lastName}`.trim() : undefined,
+    username: t.customer
+      ? `${t.customer.firstName} ${t.customer.lastName}`.trim()
+      : undefined,
     email: t.customer?.email,
     trackingNumber: t.shipment?.trackingNumber ?? null,
   }));
@@ -340,6 +358,9 @@ async function updateTicket(req, res) {
     });
   }
 
+  // Sprint 6: Real-time — notify ticket room of status/assignment changes
+  socketService.emitTicketUpdate(id, { status, assignedToId, priority });
+
   return success(res, { ticket }, "Ticket updated");
 }
 
@@ -381,30 +402,36 @@ async function deleteCannedResponse(req, res) {
 
 // ─── Sprint 6: Agent KPI Dashboard ───────────────────────────────────────────
 // Returns per-agent metrics: response time, resolution time, CSAT, volume, re-open rate.
-// Also returns team-level metrics for team leads.
+// ROLE_AGENT sees only their own metrics. SUPER_ADMIN/LOGISTICS_MANAGER/ROLE_ADMIN
+// with canViewAnalytics capability see all agents.
 async function getAgentKpi(req, res) {
-  const { from, to, agentId } = req.query;
+  const { from, to, agentId, format } = req.query;
 
-  const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days
-  const toDate   = to   ? new Date(to)   : new Date();
+  const fromDate = from
+    ? new Date(from)
+    : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const toDate = to ? new Date(to) : new Date();
+
+  // Agents only see their own data
+  const isAgent = req.user.adminSubRole === "ROLE_AGENT";
+  const scopedAgentId = isAgent ? req.user.id : agentId || undefined;
 
   const ticketWhere = {
     createdAt: { gte: fromDate, lte: toDate },
-    ...(agentId && { assignedToId: agentId }),
-    assignedToId: { not: null },
+    assignedToId: scopedAgentId ? scopedAgentId : { not: null },
   };
 
-  // Fetch all tickets in window with their messages
   const tickets = await prisma.supportTicket.findMany({
     where: ticketWhere,
     include: {
-      messages: { orderBy: { createdAt: 'asc' }, take: 1 },
+      messages: { orderBy: { createdAt: "asc" } },
       assignedTo: { select: { id: true, firstName: true, lastName: true } },
     },
+    orderBy: { createdAt: "asc" },
   });
 
-  // Group by agent
   const agentMap = {};
+
   for (const ticket of tickets) {
     const aid = ticket.assignedToId;
     if (!aid) continue;
@@ -413,68 +440,155 @@ async function getAgentKpi(req, res) {
         agentId: aid,
         agentName: ticket.assignedTo
           ? `${ticket.assignedTo.firstName} ${ticket.assignedTo.lastName}`
-          : 'Unknown',
-        totalTickets:     0,
-        resolved:         0,
-        firstResponseMs:  [],
-        resolutionMs:     [],
-        csatScores:       [],
-        reopened:         0,
-        escalated:        0,
+          : "Unknown",
+        totalTickets: 0,
+        resolved: 0,
+        firstResponseMs: [],
+        resolutionMs: [],
+        csatScores: [],
+        reopened: 0,
+        escalated: 0,
+        dailyVolume: {}, // { 'YYYY-MM-DD': count }
       };
     }
 
     const a = agentMap[aid];
     a.totalTickets++;
 
-    if (['RESOLVED', 'CLOSED'].includes(ticket.status)) a.resolved++;
-    if (ticket.status === 'ESCALATED') a.escalated++;
+    // Daily volume
+    const dayKey = new Date(ticket.createdAt).toISOString().slice(0, 10);
+    a.dailyVolume[dayKey] = (a.dailyVolume[dayKey] || 0) + 1;
 
-    // First response time (ticket created → first agent message)
-    const firstMsg = ticket.messages[0];
-    if (firstMsg) {
-      a.firstResponseMs.push(firstMsg.createdAt - ticket.createdAt);
+    if (["RESOLVED", "CLOSED"].includes(ticket.status)) a.resolved++;
+    if (ticket.status === "ESCALATED") a.escalated++;
+
+    // Re-open: any ticket that was previously RESOLVED/CLOSED but is now OPEN/IN_PROGRESS
+    if (ticket.status === "OPEN" || ticket.status === "IN_PROGRESS") {
+      const hasResolutionMessage = ticket.messages.some(
+        (m) => m.body?.toLowerCase().includes("resolved") || m.isInternal,
+      );
+      // Simpler heuristic: if resolvedAt is set but ticket is open again → reopened
+      if (ticket.resolvedAt) a.reopened++;
     }
 
-    // Resolution time (ticket created → resolvedAt, if set)
+    // First response time (ticket created → first AGENT message, not customer)
+    const firstAgentMsg = ticket.messages.find(
+      (m) => m.senderId !== ticket.customerId,
+    );
+    if (firstAgentMsg) {
+      const ms =
+        new Date(firstAgentMsg.createdAt).getTime() -
+        new Date(ticket.createdAt).getTime();
+      if (ms > 0) a.firstResponseMs.push(ms);
+    }
+
+    // Resolution time
     if (ticket.resolvedAt) {
-      a.resolutionMs.push(ticket.resolvedAt - ticket.createdAt);
+      const ms =
+        new Date(ticket.resolvedAt).getTime() -
+        new Date(ticket.createdAt).getTime();
+      if (ms > 0) a.resolutionMs.push(ms);
     }
 
-    // CSAT (if present)
+    // CSAT
     if (ticket.csatScore != null) a.csatScores.push(ticket.csatScore);
   }
 
-  // Compute averages
-  const avg = (arr) => arr.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : null;
-  const msToMin = (ms) => ms != null ? Math.round(ms / 60000) : null;
+  const avg = (arr) =>
+    arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+  const msToMin = (ms) => (ms != null ? Math.round(ms / 60000) : null);
 
-  const kpi = Object.values(agentMap).map((a) => ({
-    agentId:                   a.agentId,
-    agentName:                 a.agentName,
-    totalTickets:              a.totalTickets,
-    resolvedTickets:           a.resolved,
-    escalatedTickets:          a.escalated,
-    resolutionRate:            a.totalTickets > 0
-      ? Math.round((a.resolved / a.totalTickets) * 100)
-      : 0,
-    avgFirstResponseMinutes:   msToMin(avg(a.firstResponseMs)),
-    avgResolutionMinutes:      msToMin(avg(a.resolutionMs)),
-    avgCsatScore:              a.csatScores.length
-      ? Math.round((avg(a.csatScores) / 1) * 10) / 10
-      : null,
-    csatResponses:             a.csatScores.length,
-  }));
+  const kpi = Object.values(agentMap).map((a) => {
+    const avgFirstMs = avg(a.firstResponseMs);
+    const avgResMs = avg(a.resolutionMs);
+    return {
+      agentId: a.agentId,
+      agentName: a.agentName,
+      totalTickets: a.totalTickets,
+      resolvedTickets: a.resolved,
+      escalatedTickets: a.escalated,
+      reopenedTickets: a.reopened,
+      resolutionRate:
+        a.totalTickets > 0
+          ? Math.round((a.resolved / a.totalTickets) * 100)
+          : 0,
+      reopenRate:
+        a.resolved > 0 ? Math.round((a.reopened / a.resolved) * 100) : 0,
+      avgFirstResponseMinutes: msToMin(avgFirstMs),
+      avgResolutionMinutes: msToMin(avgResMs),
+      // Flag if over-SLA
+      firstResponseSlaBreached:
+        avgFirstMs != null && avgFirstMs > 60 * 60 * 1000, // > 1h
+      resolutionSlaBreached: avgResMs != null && avgResMs > 2 * 60 * 60 * 1000, // > 2h
+      avgCsatScore: a.csatScores.length
+        ? Math.round(avg(a.csatScores) * 10) / 10
+        : null,
+      csatResponses: a.csatScores.length,
+      // Volume: array sorted by date for sparkline
+      dailyVolume: Object.entries(a.dailyVolume)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, count]) => ({ date, count })),
+    };
+  });
 
-  // Team totals
   const team = {
-    totalTickets:  tickets.length,
-    totalResolved: tickets.filter(t => ['RESOLVED','CLOSED'].includes(t.status)).length,
-    totalEscalated: tickets.filter(t => t.status === 'ESCALATED').length,
+    totalTickets: tickets.length,
+    totalResolved: tickets.filter((t) =>
+      ["RESOLVED", "CLOSED"].includes(t.status),
+    ).length,
+    totalEscalated: tickets.filter((t) => t.status === "ESCALATED").length,
+    totalReopened: tickets.filter(
+      (t) => t.resolvedAt && ["OPEN", "IN_PROGRESS"].includes(t.status),
+    ).length,
+    slaAdherencePercent:
+      tickets.length > 0
+        ? Math.round(
+            (tickets.filter((t) => t.status !== "ESCALATED").length /
+              tickets.length) *
+              100,
+          )
+        : 100,
     period: { from: fromDate, to: toDate },
   };
 
-  return success(res, { kpi, team }, 'Agent KPI report');
+  // CSV export
+  if (format === "csv") {
+    const headers = [
+      "Agent",
+      "Total Tickets",
+      "Resolved",
+      "Resolution Rate %",
+      "Escalated",
+      "Reopened",
+      "Reopen Rate %",
+      "Avg First Response (min)",
+      "Avg Resolution (min)",
+      "Avg CSAT",
+      "CSAT Responses",
+    ];
+    const rows = kpi.map((a) => [
+      a.agentName,
+      a.totalTickets,
+      a.resolvedTickets,
+      a.resolutionRate,
+      a.escalatedTickets,
+      a.reopenedTickets,
+      a.reopenRate,
+      a.avgFirstResponseMinutes ?? "",
+      a.avgResolutionMinutes ?? "",
+      a.avgCsatScore ?? "",
+      a.csatResponses,
+    ]);
+    const csv = [headers, ...rows].map((r) => r.join(",")).join("\n");
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="agent-kpi-${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    return res.send(csv);
+  }
+
+  return success(res, { kpi, team }, "Agent KPI report");
 }
 
 // ─── Sprint 6: Ticket Escalation Job ─────────────────────────────────────────
@@ -485,12 +599,12 @@ async function runEscalationJob() {
 
   const stale = await prisma.supportTicket.findMany({
     where: {
-      status: 'IN_PROGRESS',
+      status: "IN_PROGRESS",
       createdAt: { lt: FOUR_HOURS_AGO },
       // Only escalate once — skip already-escalated
     },
     include: {
-      customer:   { select: { firstName: true, lastName: true, email: true } },
+      customer: { select: { firstName: true, lastName: true, email: true } },
       assignedTo: { select: { firstName: true, lastName: true } },
     },
   });
@@ -500,8 +614,8 @@ async function runEscalationJob() {
   // Find a SUPER_ADMIN / LOGISTICS_MANAGER to notify
   const teamLead = await prisma.user.findFirst({
     where: {
-      role: 'ADMIN',
-      adminSubRole: { in: ['SUPER_ADMIN', 'LOGISTICS_MANAGER'] },
+      role: "ADMIN",
+      adminSubRole: { in: ["SUPER_ADMIN", "LOGISTICS_MANAGER"] },
       isActive: true,
     },
   });
@@ -512,7 +626,7 @@ async function runEscalationJob() {
     try {
       await prisma.supportTicket.update({
         where: { id: ticket.id },
-        data: { status: 'ESCALATED' },
+        data: { status: "ESCALATED" },
       });
 
       // Notify team lead in-app
@@ -520,10 +634,10 @@ async function runEscalationJob() {
         await prisma.notification.create({
           data: {
             userId: teamLead.id,
-            type:   'SYSTEM',
-            title:  `🚨 Ticket Escalated: ${ticket.ticketNumber}`,
-            body:   `Ticket "${ticket.subject}" has been unresolved for over 4 hours. Assigned to: ${ticket.assignedTo ? `${ticket.assignedTo.firstName} ${ticket.assignedTo.lastName}` : 'Unassigned'}.`,
-            data:   { ticketId: ticket.id, ticketNumber: ticket.ticketNumber },
+            type: "SYSTEM",
+            title: `🚨 Ticket Escalated: ${ticket.ticketNumber}`,
+            body: `Ticket "${ticket.subject}" has been unresolved for over 4 hours. Assigned to: ${ticket.assignedTo ? `${ticket.assignedTo.firstName} ${ticket.assignedTo.lastName}` : "Unassigned"}.`,
+            data: { ticketId: ticket.id, ticketNumber: ticket.ticketNumber },
           },
         });
       }
@@ -544,18 +658,21 @@ async function submitCsat(req, res) {
   const { score } = req.body;
 
   if (!score || score < 1 || score > 5) {
-    throw new ApiError(400, 'score must be an integer between 1 and 5');
+    throw new ApiError(400, "score must be an integer between 1 and 5");
   }
 
   const ticket = await prisma.supportTicket.findFirst({
     where: { id, customerId: req.user.id },
   });
-  if (!ticket) throw new ApiError(404, 'Ticket not found');
-  if (!['RESOLVED', 'CLOSED'].includes(ticket.status)) {
-    throw new ApiError(400, 'CSAT can only be submitted for resolved tickets');
+  if (!ticket) throw new ApiError(404, "Ticket not found");
+  if (!["RESOLVED", "CLOSED"].includes(ticket.status)) {
+    throw new ApiError(400, "CSAT can only be submitted for resolved tickets");
   }
   if (ticket.csatScore != null) {
-    throw new ApiError(409, 'You have already submitted a rating for this ticket');
+    throw new ApiError(
+      409,
+      "You have already submitted a rating for this ticket",
+    );
   }
 
   await prisma.supportTicket.update({
@@ -563,7 +680,7 @@ async function submitCsat(req, res) {
     data: { csatScore: parseInt(score, 10) },
   });
 
-  return success(res, {}, 'Thank you for your feedback!');
+  return success(res, {}, "Thank you for your feedback!");
 }
 
 module.exports = {

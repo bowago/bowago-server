@@ -512,6 +512,7 @@ module.exports = {
   downloadBookingConfirmation,
   financialOverview,
   myInvoiceSummary,
+  autoGenerateInvoice,
 };
 
 // ─── GET /invoices/admin — Admin list of all invoices ─────────────────────────
@@ -575,4 +576,61 @@ async function adminListInvoices(req, res) {
     data: { invoices },
     meta: buildMeta(total, page, limit),
   });
+}
+
+// ─── Auto-generate invoice on DELIVERED (called from shipment.controller) ─────
+// Creates a PDF, stores on Cloudinary, and emails it to the customer.
+// This is non-blocking — the caller wraps it in .catch() so a failure here
+// never affects the status-update API response.
+async function autoGenerateInvoice(shipment) {
+  // Only run for paid shipments that have a linked payment
+  const payment = await prisma.payment.findFirst({
+    where:   { shipmentId: shipment.id, status: 'PAID' },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+    },
+  });
+  if (!payment) return; // unpaid or COD — skip
+
+  const invoiceNumber = buildInvoiceNumber(payment);
+
+  const pdfBuffer = await generateInvoicePDF({
+    invoice:  { number: invoiceNumber, date: payment.createdAt },
+    customer: payment.user,
+    shipment,
+    payment,
+  });
+
+  // Upload to Cloudinary (non-critical — if upload fails, still email)
+  try {
+    await uploadPDFAndGetSignedUrl(
+      pdfBuffer,
+      `invoices/${payment.userId}`,
+      `invoice-${invoiceNumber}-delivered`,
+    );
+  } catch (e) {
+    console.error('[AutoInvoice] Cloudinary upload failed:', e.message);
+  }
+
+  // Email invoice to customer
+  await sendInvoiceEmail({
+    to:            payment.user.email,
+    firstName:     payment.user.firstName,
+    invoiceNumber: `INV-${invoiceNumber}`,
+    amount:        payment.amountKobo / 100,
+    trackingNumber: shipment.trackingNumber,
+    pdfBuffer,
+  });
+
+  // In-app notification
+  await prisma.notification.create({
+    data: {
+      userId: payment.userId,
+      type:   'PAYMENT',
+      title:  `Invoice Ready — ${shipment.trackingNumber}`,
+      body:   `Your invoice INV-${invoiceNumber} for ₦${(payment.amountKobo / 100).toLocaleString()} has been sent to your email.`,
+      data:   { shipmentId: shipment.id, invoiceNumber },
+    },
+  }).catch(() => {});
 }

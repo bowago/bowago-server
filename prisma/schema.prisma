@@ -212,6 +212,7 @@ model User {
   priceAuditLogs      PriceAuditLog[]
   contractRate       ContractRate?
   promoRedemptions   PromoRedemption[]
+  loyaltyAccount     LoyaltyAccount?   @relation("UserLoyalty")
 
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
@@ -477,6 +478,7 @@ model Shipment {
   // they only ever had the raw shipmentId. Added so listTickets/getTicket
   // can `include: { shipment: { select: { trackingNumber: true } } }`.
   supportTickets   SupportTicket[]
+  delayAlert       DelayAlert?
 
   pickupLat           Float?
   pickupLng           Float?
@@ -559,6 +561,25 @@ model PriceAdjustment {
   acknowledgedAt  DateTime?
   isPaid          Boolean   @default(false)
   paymentRef      String?
+
+  // ── Resolution workflow (PRD: Post-Booking Price Shock Prevention) ─────────
+  // status: PENDING | PAID | DOWNGRADED | CANCELLED | EXPIRED
+  status          String    @default("PENDING")
+  // Shipment status captured at the moment it was paused, so we know what
+  // to resume it to once resolved (rather than guessing).
+  previousStatus  String?
+  // Deadline for the customer to respond. Configurable via AppSettings
+  // (price_adjustment.response_window_hours). Past this, the scheduler
+  // auto-cancels with a refund.
+  responseDeadline DateTime?
+  resolvedAt      DateTime?
+  // resolutionType: PAY | DOWNGRADE | CANCEL | AUTO_CANCEL
+  resolutionType  String?
+  refundPercent   Int?
+  refundAmount    Float?
+  // Support/admin override of the deadline
+  extendedBy      String?
+  extensionNote   String?
 
   shipment        Shipment  @relation(fields: [shipmentId], references: [id])
 
@@ -1078,4 +1099,63 @@ model OrgInvite {
   @@index([email])
   @@index([status])
   @@map("org_invites")
+}
+
+// ─── LOYALTY & REWARDS (Customer Portal) ─────────────────────────────────────
+// Points are earned on paid delivery and redeemed at checkout.
+// Tier is recalculated each time points are earned.
+//
+// Tier thresholds (configurable via AppSettings):
+//   BRONZE  0–499 pts   → no multiplier
+//   SILVER  500–1999    → 1.25×
+//   GOLD    2000–4999   → 1.5×
+//   PLATINUM 5000+      → 2×
+//
+// Earn rate: 1 point per ₦100 of shipment final price (configurable).
+// Redeem rate: 1 point = ₦1 discount, min 50 pts per redemption (configurable).
+
+model LoyaltyAccount {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  points          Int       @default(0)    // current spendable balance
+  lifetimePoints  Int       @default(0)    // never decremented — used for tier
+  tier            String    @default("BRONZE") // BRONZE | SILVER | GOLD | PLATINUM
+
+  user            User      @relation("UserLoyalty", fields: [userId], references: [id])
+  transactions    LoyaltyTransaction[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("loyalty_accounts")
+}
+
+model LoyaltyTransaction {
+  id          String   @id @default(uuid())
+  accountId   String
+  type        String   // EARN | REDEEM | ADJUST | EXPIRE
+  points      Int      // positive = earn, negative = redeem/expire
+  description String
+  shipmentId  String?  // source shipment for EARN or REDEEM
+
+  account     LoyaltyAccount @relation(fields: [accountId], references: [id])
+
+  createdAt   DateTime @default(now())
+  @@map("loyalty_transactions")
+}
+
+// ─── DELAY ALERTS (SLA Breach Detection) ─────────────────────────────────────
+// Written by the SLA breach scheduler when a shipment overruns its estimated
+// delivery date. Used to avoid spamming the same customer on every sweep.
+
+model DelayAlert {
+  id          String   @id @default(uuid())
+  shipmentId  String
+  alertedAt   DateTime @default(now())
+  reason      String?
+
+  shipment    Shipment @relation(fields: [shipmentId], references: [id])
+
+  @@unique([shipmentId])  // one active alert per shipment
+  @@map("delay_alerts")
 }

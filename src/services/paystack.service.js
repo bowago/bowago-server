@@ -160,6 +160,51 @@ async function verifyPayment(reference) {
   }
 
   if (isPaid && payment.shipmentId) {
+    const paymentType = payment.metadata?.type;
+    const isPriceAdjustmentPayment =
+      paymentType === 'PRICE_ADJUSTMENT' || paymentType === 'PRICE_ADJUSTMENT_DOWNGRADE';
+
+    if (isPriceAdjustmentPayment) {
+      // Resume to whatever status the shipment was paused FROM, not the
+      // normal post-booking AWAITING_PICKUP — the shipment may already have
+      // been further along (e.g. CONFIRMED) before the weight discrepancy
+      // paused it.
+      const adjustmentId = payment.metadata?.adjustmentId;
+      const adjustment = adjustmentId
+        ? await prisma.priceAdjustment.findUnique({ where: { id: adjustmentId } })
+        : null;
+      const resumeStatus = adjustment?.previousStatus || 'CONFIRMED';
+
+      await prisma.shipment.update({
+        where: { id: payment.shipmentId },
+        data: { status: resumeStatus, finalPrice: tx.amount / 100 },
+      });
+
+      if (adjustment) {
+        await prisma.priceAdjustment.update({
+          where: { id: adjustment.id },
+          data: { status: 'PAID', resolutionType: 'PAY', resolvedAt: new Date(), isPaid: true, paymentRef: reference },
+        });
+      }
+
+      await prisma.trackingEvent.create({
+        data: {
+          shipmentId: payment.shipmentId,
+          status: resumeStatus,
+          description: `Price adjustment paid via ${tx.channel || 'card'}. Shipment resumed.`,
+        },
+      });
+
+      await prisma.notification.create({
+        data: {
+          userId: payment.userId,
+          type: 'PAYMENT',
+          title: 'Price Adjustment Paid',
+          body: `Your payment of ₦${(tx.amount / 100).toLocaleString()} has been received. Your shipment has resumed.`,
+          data: { reference, shipmentId: payment.shipmentId },
+        },
+      });
+    } else {
     // PRD Sprint 3 state machine: Quoted → Booked → Paid → AWAITING_PICKUP
     await prisma.shipment.update({
       where: { id: payment.shipmentId },
@@ -247,6 +292,7 @@ async function verifyPayment(reference) {
     } catch (emailErr) {
       // Non-blocking — payment already verified, don't fail because of email
       console.error("Post-payment email error:", emailErr.message);
+    }
     }
   }
 

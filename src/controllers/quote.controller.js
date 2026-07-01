@@ -2,6 +2,7 @@ const { prisma } = require("../config/db");
 const { calculateShippingCost } = require("../services/pricing.service");
 const { ApiError } = require("../utils/ApiError");
 const { success, created } = require("../utils/helpers");
+const { getNumberSetting } = require("../services/settings.service");
 
 const QUOTE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -80,14 +81,21 @@ async function generateQuote(req, res) {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + QUOTE_TTL_MS);
 
-  // Insurance premium (2.5% of declared value, min ₦100)
+  // Insurance premium — rate is configurable by Super Admin in
+  // Settings → Business Rules (insurance.rate_percent, default 2.5%).
+  // Minimum premium is also configurable (insurance.min_premium_naira, default ₦100).
   let insurancePremiumKobo = null;
   let declaredValueKobo = null;
   if (insuranceSelected && declaredValue) {
+    const [ratePercent, minPremiumNaira] = await Promise.all([
+      getNumberSetting('insurance.rate_percent'),
+      getNumberSetting('insurance.min_premium_naira'),
+    ]);
     declaredValueKobo = toKobo(declaredValue);
+    const minPremiumKobo = toKobo(minPremiumNaira);
     insurancePremiumKobo = Math.max(
-      10000,
-      Math.round(declaredValueKobo * 0.025),
+      minPremiumKobo,
+      Math.round(declaredValueKobo * (ratePercent / 100)),
     );
   }
 

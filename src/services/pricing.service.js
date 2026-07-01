@@ -88,20 +88,38 @@ async function applySurcharges(basePrice, serviceType = 'STANDARD', options = {}
 }
 
 // ─── Contract rate lookup (Sprint 2) ─────────────────────────────────────────
+// Priority: user's own rate first, then their org master's rate (enterprise).
+// This means assigning a contract rate to a ROLE_MASTER user automatically
+// applies it to all their team members — matching the PRD requirement:
+// "A logged-in Enterprise Client sees a different (lower) price than a Guest."
 async function getContractRate(userId, serviceType) {
   if (!userId) return null;
 
-  return prisma.contractRate.findFirst({
-    where: {
-      userId,
-      isActive: true,
-      OR: [{ serviceType }, { serviceType: null }],
-      AND: [
-        { OR: [{ validFrom: null }, { validFrom: { lte: new Date() } }] },
-        { OR: [{ validUntil: null }, { validUntil: { gte: new Date() } }] },
-      ],
-    },
+  const rateWhere = (targetId) => ({
+    userId:   targetId,
+    isActive: true,
+    OR: [{ serviceType }, { serviceType: null }],
+    AND: [
+      { OR: [{ validFrom: null }, { validFrom: { lte: new Date() } }] },
+      { OR: [{ validUntil: null }, { validUntil: { gte: new Date() } }] },
+    ],
   });
+
+  // 1. Check for a rate assigned directly to this user
+  const directRate = await prisma.contractRate.findFirst({ where: rateWhere(userId) });
+  if (directRate) return directRate;
+
+  // 2. Check if the user belongs to an org — if so, use the master's rate
+  const user = await prisma.user.findUnique({
+    where:  { id: userId },
+    select: { masterId: true },
+  });
+  if (user?.masterId) {
+    const orgRate = await prisma.contractRate.findFirst({ where: rateWhere(user.masterId) });
+    if (orgRate) return orgRate;
+  }
+
+  return null;
 }
 
 // ─── Promo code validation (Sprint 2) ────────────────────────────────────────

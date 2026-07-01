@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { prisma } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
 const { success, created, getPagination, buildMeta } = require('../utils/helpers');
+const { sendInviteEmail } = require('../config/email');
 
 const INVITE_EXPIRY_DAYS = 7;
 const ALLOWED_INVITE_ROLES = [
@@ -66,23 +67,16 @@ async function inviteMember(req, res) {
   const baseUrl = process.env.FRONTEND_URL || 'https://app.bowago.com';
   const inviteUrl = `${baseUrl}/auth/accept-invite?token=${token}`;
 
-  // Send invite email (non-blocking)
-  const { transporter } = require('../config/email');
-  if (transporter) {
-    transporter.sendMail({
-      to:      email,
-      from:    process.env.EMAIL_FROM || 'noreply@bowago.com',
-      subject: `You've been invited to join BowaGO`,
-      html: `
-        <p>Hi,</p>
-        <p><strong>${inviter.firstName} ${inviter.lastName}</strong> has invited you to join the BowaGO platform as a <strong>${role.replace('ROLE_', '')}</strong>.</p>
-        <p>Click the link below to accept your invite and set your password. This link expires in ${INVITE_EXPIRY_DAYS} days.</p>
-        <p><a href="${inviteUrl}" style="background:#1F3A70;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;display:inline-block;">Accept Invite</a></p>
-        <p>Or copy this link: <code>${inviteUrl}</code></p>
-        <p>If you did not expect this invite, you can safely ignore this email.</p>
-      `,
-    }).catch((err) => console.error('[OrgInvite] Email send failed:', err.message));
-  }
+  // Send invite email. sendInviteEmail uses the shared SMTP transporter from
+  // config/email.js and will throw if the transporter is misconfigured — we
+  // catch so an SMTP failure doesn't fail the whole invite creation.
+  sendInviteEmail({
+    toEmail:    email,
+    inviterName: `${inviter.firstName} ${inviter.lastName}`,
+    role,
+    inviteUrl,
+    expiryDays: INVITE_EXPIRY_DAYS,
+  }).catch((err) => console.error('[OrgInvite] Email send failed:', err.message));
 
   return created(res, {
     inviteId:  invite.id,
@@ -229,16 +223,13 @@ async function resendInvite(req, res) {
   const baseUrl   = process.env.FRONTEND_URL || 'https://app.bowago.com';
   const inviteUrl = `${baseUrl}/auth/accept-invite?token=${token}`;
 
-  const { transporter } = require('../config/email');
-  if (transporter) {
-    transporter.sendMail({
-      to:      invite.email,
-      from:    process.env.EMAIL_FROM || 'noreply@bowago.com',
-      subject: `Your BowaGO invite has been resent`,
-      html: `<p>Your invite to join BowaGO as <strong>${invite.role.replace('ROLE_', '')}</strong> has been refreshed.</p>
-             <p><a href="${inviteUrl}">Accept Invite</a> (expires in ${INVITE_EXPIRY_DAYS} days)</p>`,
-    }).catch(() => {});
-  }
+  sendInviteEmail({
+    toEmail:     invite.email,
+    inviterName: 'your team admin',
+    role:        invite.role,
+    inviteUrl,
+    expiryDays:  INVITE_EXPIRY_DAYS,
+  }).catch(() => {});
 
   return success(res, { inviteId: updated.id, expiresAt: updated.expiresAt }, 'Invite resent');
 }

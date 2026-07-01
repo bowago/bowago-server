@@ -414,6 +414,37 @@ async function googleAuth(req, res) {
 
   if (!user.isActive) throw new ApiError(403, "Account suspended");
 
+  // ─── 2FA Challenge ────────────────────────────────────────────────────────
+  // If the user has enabled 2FA, Google authentication is not sufficient on
+  // its own — we must still verify the second factor before issuing tokens,
+  // so that requireRecentMFA (used on the Invoices page) is satisfied.
+  // The same OTP type (TWO_FACTOR_LOGIN) is used as for email/password login,
+  // so the existing POST /auth/login-2fa endpoint handles completion.
+  if (user.twoFactorEnabled) {
+    let deliveryChannel = "EMAIL";
+    if (user.twoFactorMethod === "SMS" && user.phone) {
+      try {
+        await sendOtp(user.id, user.phone, "TWO_FACTOR_LOGIN", "SMS");
+        deliveryChannel = "SMS";
+      } catch {
+        // SMS failed — fall back to email
+        await sendOtp(user.id, user.email, "TWO_FACTOR_LOGIN", "EMAIL");
+        deliveryChannel = "EMAIL";
+      }
+    } else {
+      await sendOtp(user.id, user.email, "TWO_FACTOR_LOGIN", "EMAIL");
+    }
+    return success(
+      res,
+      {
+        requires2FA: true,
+        email: user.email,
+        deliveryChannel,
+      },
+      `Verification code sent via ${deliveryChannel === "SMS" ? "SMS" : "email"}. Enter it to complete sign-in.`,
+    );
+  }
+
   const tokens = await generateTokenPair(
     user,
     req.headers["user-agent"],

@@ -137,10 +137,9 @@ async function deleteContractRate(req, res) {
   const existing = await prisma.contractRate.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, 'Contract rate not found');
 
-  // Soft-deactivate rather than delete (preserve history)
-  await prisma.contractRate.update({ where: { id }, data: { isActive: false } });
+  await prisma.contractRate.delete({ where: { id } });
 
-  return success(res, {}, 'Contract rate deactivated');
+  return success(res, {}, 'Contract rate deleted');
 }
 
 // ─── Customer: Get my contract rate (if any) ─────────────────────────────────
