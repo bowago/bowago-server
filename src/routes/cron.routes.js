@@ -1,75 +1,94 @@
-// cron.routes.js — Vercel Cron Job endpoints
-// Vercel calls these on a schedule defined in vercel.json.
-// Each route is protected by a shared CRON_SECRET so random internet
-// traffic can't trigger them. Vercel automatically sets the
-// x-vercel-cron header but we double-check with our own secret.
+// cron.routes.js — Upstash QStash scheduled job endpoints
 //
-// Cheaper alternative: Upstash QStash (free tier: 500 msgs/month)
-// Just point QStash at the same URL with the Authorization header.
+// These endpoints are no longer triggered by Vercel Cron Jobs (Hobby plan
+// only allows once-per-day schedules, which was too slow for these jobs).
+// Instead, Upstash QStash calls these URLs on a schedule you configure in
+// the Upstash Console (see setup notes at the bottom of this file).
+//
+// QStash signs every request with a JWT in the `Upstash-Signature` header.
+// We verify that signature instead of a static secret, so only genuine
+// QStash deliveries can trigger these jobs. Verification needs the RAW
+// request body — see the `/api/v1/cron` raw-body middleware in app.js,
+// which must run BEFORE express.json() for this to work.
 
-const router = require('express').Router();
-const { runExpiredAdjustmentSweep } = require('../services/priceAdjustmentScheduler.service');
-const { runEscalationJob } = require('../controllers/support.controller');
+const router = require("express").Router();
+const { Receiver } = require("@upstash/qstash");
+const {
+  runExpiredAdjustmentSweep,
+} = require("../services/priceAdjustmentScheduler.service");
+const { runEscalationJob } = require("../controllers/support.controller");
+const { runSLABreachSweep } = require("../services/slaBreachScheduler.service");
 
-function verifyCronSecret(req, res, next) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    // If CRON_SECRET is not set, block all cron calls in production
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(403).json({ error: 'CRON_SECRET not configured' });
+const receiver =
+  process.env.QSTASH_CURRENT_SIGNING_KEY && process.env.QSTASH_NEXT_SIGNING_KEY
+    ? new Receiver({
+        currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
+        nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY,
+      })
+    : null;
+
+async function verifyQStashSignature(req, res, next) {
+  if (!receiver) {
+    // No signing keys configured yet — block in production, allow in dev
+    // so you can still hit these routes manually with curl/Postman locally.
+    if (process.env.NODE_ENV === "production") {
+      return res
+        .status(403)
+        .json({ error: "QStash signing keys not configured" });
     }
-    return next(); // allow in dev without the env var
+    return next();
   }
-  const auth = req.headers['authorization'] ?? '';
-  if (auth !== `Bearer ${secret}`) {
-    return res.status(403).json({ error: 'Invalid cron secret' });
+
+  const signature = req.headers["upstash-signature"];
+  if (!signature) {
+    return res.status(401).json({ error: "Missing Upstash-Signature header" });
   }
-  return next();
+
+  try {
+    const isValid = await receiver.verify({
+      signature,
+      body: req.rawBody ?? "",
+    });
+    if (!isValid) {
+      return res.status(401).json({ error: "Invalid QStash signature" });
+    }
+    return next();
+  } catch (err) {
+    console.error("[Cron] QStash signature verification failed:", err.message);
+    return res.status(401).json({ error: "Invalid QStash signature" });
+  }
 }
 
 /**
  * POST /api/v1/cron/sweep-price-adjustments
- *
  * Auto-cancels price adjustments whose response deadline has passed.
- * Add to vercel.json:
- *
- *   {
- *     "crons": [
- *       {
- *         "path": "/api/v1/cron/sweep-price-adjustments",
- *         "schedule": "* /15 * * * *"   (every 15 min — remove the space)
- *       }
- *     ]
- *   }
- *
- * And set CRON_SECRET in your Vercel environment variables.
- * Vercel sends the Authorization: Bearer <CRON_SECRET> header automatically.
+ * Suggested QStash schedule: every hour → "0 * * * *"
  */
-router.post('/sweep-price-adjustments', verifyCronSecret, async (req, res) => {
-  try {
-    const result = await runExpiredAdjustmentSweep();
-    return res.json({ ok: true, processed: result.processed });
-  } catch (err) {
-    console.error('[Cron] sweep-price-adjustments failed:', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
+router.post(
+  "/sweep-price-adjustments",
+  verifyQStashSignature,
+  async (req, res) => {
+    try {
+      const result = await runExpiredAdjustmentSweep();
+      return res.json({ ok: true, processed: result.processed });
+    } catch (err) {
+      console.error("[Cron] sweep-price-adjustments failed:", err.message);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  },
+);
 
 /**
  * POST /api/v1/cron/escalate-tickets
- *
  * Escalates stale support tickets that have been IN_PROGRESS for > 4 hours.
- * Add to vercel.json:
- *
- *   { "path": "/api/v1/cron/escalate-tickets", "schedule": "0 * /1 * * *" }
- *   (every hour — remove the space in * /1)
+ * Suggested QStash schedule: every 4 hours ("0 0,4,8,12,16,20 * * *")
  */
-router.post('/escalate-tickets', verifyCronSecret, async (req, res) => {
+router.post("/escalate-tickets", verifyQStashSignature, async (req, res) => {
   try {
     const result = await runEscalationJob();
     return res.json({ ok: true, escalated: result.escalated });
   } catch (err) {
-    console.error('[Cron] escalate-tickets failed:', err.message);
+    console.error("[Cron] escalate-tickets failed:", err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -77,16 +96,14 @@ router.post('/escalate-tickets', verifyCronSecret, async (req, res) => {
 /**
  * POST /api/v1/cron/sla-breach-sweep
  * Sends delay alerts for overdue shipments past their estimated delivery date.
- * Add to vercel.json: { "path": "/api/v1/cron/sla-breach-sweep", "schedule": "0 * /2 * * *" }
- * (every 2 hours — remove space in * /2)
+ * Suggested QStash schedule: every 6 hours ("0 0,6,12,18 * * *")
  */
-const { runSLABreachSweep } = require('../services/slaBreachScheduler.service');
-router.post('/sla-breach-sweep', verifyCronSecret, async (req, res) => {
+router.post("/sla-breach-sweep", verifyQStashSignature, async (req, res) => {
   try {
     const result = await runSLABreachSweep();
     return res.json({ ok: true, alerted: result.alerted });
   } catch (err) {
-    console.error('[Cron] sla-breach-sweep failed:', err.message);
+    console.error("[Cron] sla-breach-sweep failed:", err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
