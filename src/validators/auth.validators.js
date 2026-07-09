@@ -1,8 +1,26 @@
 const Joi = require('joi');
 
+// PRD Sprint 2 password requirements: min 12 chars, 1 uppercase, 1 lowercase,
+// 1 digit, 1 special character, and must not contain the account email's
+// local part (checked at the schema level below where email is present).
 const password = Joi.string().min(12).max(128)
-  .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-  .message('Password must be at least 12 characters with uppercase, lowercase, and number');
+  .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).*$/)
+  .message('Password must be at least 12 characters with uppercase, lowercase, number, and special character');
+
+// Schema-level rule: password must not contain the email's local part
+// (e.g. "john.doe@x.com" → password may not contain "john.doe").
+// Applied to any schema that carries both an email and a password field.
+function passwordNotContainingEmail(passwordField) {
+  return (value, helpers) => {
+    const email = String(value.email || '').toLowerCase();
+    const pwd = String(value[passwordField] || '').toLowerCase();
+    const localPart = email.split('@')[0];
+    if (localPart && localPart.length >= 3 && pwd.includes(localPart)) {
+      return helpers.message('Password must not contain your email address');
+    }
+    return value;
+  };
+}
 
 const registerSchema = Joi.object({
   email: Joi.string().email().lowercase().required(),
@@ -10,7 +28,7 @@ const registerSchema = Joi.object({
   firstName: Joi.string().min(1).max(50).trim().required(),
   lastName: Joi.string().min(1).max(50).trim().required(),
   phone: Joi.string().pattern(/^\+?[0-9]{10,15}$/).optional(),
-});
+}).custom(passwordNotContainingEmail('password'));
 
 const loginSchema = Joi.object({
   email: Joi.string().email().lowercase().required(),
@@ -35,7 +53,7 @@ const resetPasswordSchema = Joi.object({
   email: Joi.string().email().lowercase().required(),
   code: Joi.string().length(6).pattern(/^\d+$/).required(),
   newPassword: password.required(),
-});
+}).custom(passwordNotContainingEmail('newPassword'));
 
 const changePasswordSchema = Joi.object({
   currentPassword: Joi.string().required(),

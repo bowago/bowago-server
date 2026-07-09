@@ -5,6 +5,12 @@ const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
 const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { ApiError } = require("../utils/ApiError");
+const { assertOwnedResourceAccess } = require("../utils/access");
+const {
+  getCachedTracking,
+  setCachedTracking,
+  invalidateTracking,
+} = require("../services/cache.service");
 const {
   success,
   created,
@@ -14,6 +20,7 @@ const {
 } = require("../utils/helpers");
 const { earnPoints } = require("../services/loyalty.service");
 const { autoGenerateInvoice } = require("./invoice.controller");
+const { recordPromoRedemption } = require("./promoCode.controller");
 
 // ─── Sprint 7: Consent helper ─────────────────────────────────────────────────
 async function recordConsent(userId, consentType, req) {
@@ -64,6 +71,7 @@ async function createShipment(req, res) {
     notes,
     pickupDate,
     quoteId,
+    promoCode,
   } = req.body;
 
   console.log(
@@ -90,6 +98,11 @@ async function createShipment(req, res) {
   let quotedPrice;
   let resolvedServiceType = serviceType || "STANDARD";
   let resolvedInsuranceValue = requiresInsurance ? insuranceValue || null : 0;
+  // Tracked so we can call recordPromoRedemption once the shipment exists —
+  // this was previously never called anywhere, so maxUses/per-user-reuse
+  // limits on promo codes silently never took effect.
+  let appliedPromoCode = null;
+  let appliedPromoDiscountNaira = 0;
 
   if (quoteId) {
     console.log("[createShipment] using locked quote:", quoteId);
@@ -164,6 +177,11 @@ async function createShipment(req, res) {
     quotedPrice = lockedQuote.totalPriceKobo / 100;
     resolvedServiceType = lockedQuote.serviceType;
 
+    if (lockedQuote.promoCode && lockedQuote.pricingMode === "PROMO") {
+      appliedPromoCode = lockedQuote.promoCode;
+      appliedPromoDiscountNaira = (lockedQuote.promoDiscountKobo || 0) / 100;
+    }
+
     if (lockedQuote.insuranceSelected && lockedQuote.declaredValueKobo) {
       resolvedInsuranceValue = lockedQuote.declaredValueKobo / 100;
     }
@@ -183,9 +201,15 @@ async function createShipment(req, res) {
       isFragile: !!isFragile,
       requiresInsurance: !!requiresInsurance,
       insuranceValue: resolvedInsuranceValue,
+      promoCode: promoCode || null,
       userId: req.user?.id,
     });
     quotedPrice = quote.total;
+
+    if (quote.pricingMode === "PROMO" && promoCode) {
+      appliedPromoCode = promoCode;
+      appliedPromoDiscountNaira = quote.appliedDiscount?.discountAmount || 0;
+    }
   }
 
   console.log(
@@ -302,6 +326,21 @@ async function createShipment(req, res) {
     console.log("[createShipment] quote marked BOOKED");
   }
 
+  // Record promo redemption — increments usedCount and creates the
+  // PromoRedemption row so maxUses / per-user reuse limits actually take
+  // effect. Fire-and-forget: a redemption-logging failure should never
+  // block a shipment that's already been created and charged.
+  if (appliedPromoCode) {
+    recordPromoRedemption(
+      appliedPromoCode,
+      req.user.id,
+      shipment.id,
+      appliedPromoDiscountNaira,
+    ).catch((err) =>
+      console.error("[createShipment] recordPromoRedemption failed:", err.message),
+    );
+  }
+
   // Sprint 7: SHIPPING_RULES consent (fire-and-forget)
   recordConsent(req.user.id, "SHIPPING_RULES", req);
 
@@ -384,10 +423,14 @@ async function getShipment(req, res) {
 
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  // Customer can only view their own shipments
-  if (req.user.role === "CUSTOMER" && shipment.customerId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  // Ownership check for ALL non-admin roles. Customers see only their own
+  // shipments; Enterprise users see only shipments belonging to their own
+  // tenant (never another company's). Denied attempts are security-logged.
+  await assertOwnedResourceAccess(req.user, shipment.customerId, {
+    resource: "Shipment",
+    resourceId: shipment.id,
+    req,
+  });
 
   return success(res, { shipment });
 }
@@ -396,7 +439,14 @@ async function getShipment(req, res) {
 async function trackShipment(req, res) {
   const { trackingNumber } = req.params;
 
-  const shipment = await prisma.shipment.findUnique({
+  // ── Sprint 4: Redis cache for tracking queries ────────────────────────────
+  // The raw DB payload is cached (short TTL + invalidation on status change);
+  // per-viewer masking below is always applied AFTER the cache so a cached
+  // owner view can never leak full addresses to a guest.
+  let shipment = await getCachedTracking(trackingNumber);
+  let cameFromCache = !!shipment;
+
+  if (!shipment) shipment = await prisma.shipment.findUnique({
     where: { trackingNumber },
     select: {
       trackingNumber: true,
@@ -435,6 +485,8 @@ async function trackShipment(req, res) {
 
   if (!shipment) throw new ApiError(404, "Tracking number not found");
 
+  if (!cameFromCache) setCachedTracking(trackingNumber, shipment); // fire-and-forget
+
   // ── Address masking for unauthenticated/public access ─────────────────────
   // PRD Sprint 4: Non-logged-in users see only city/state, not full street.
   // Logged-in users who own the shipment see full addresses.
@@ -470,6 +522,29 @@ async function trackShipment(req, res) {
   return success(res, { shipment: masked });
 }
 
+// ─── Shipment state machine (PRD Sprints 1 & 3) ───────────────────────────────
+// "State transitions enforced (invalid transitions blocked)" — Master DoD.
+// Flow: PENDING → BOOKED → (paid) AWAITING_PICKUP → CONFIRMED → PICKED_UP →
+// IN_TRANSIT → OUT_FOR_DELIVERY → DELIVERED. FAILED can retry delivery or be
+// returned/cancelled. DELIVERED / CANCELLED / RETURNED are terminal.
+// PENDING_ADMIN_REVIEW (address change / weight discrepancy holds) resumes
+// back into the pre-pickup flow via its own approval controllers, but admins
+// can also resolve it here.
+const VALID_STATUS_TRANSITIONS = {
+  PENDING: ["BOOKED", "AWAITING_PICKUP", "CONFIRMED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  BOOKED: ["AWAITING_PICKUP", "CONFIRMED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  AWAITING_PICKUP: ["CONFIRMED", "PICKED_UP", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  CONFIRMED: ["AWAITING_PICKUP", "PICKED_UP", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  PICKED_UP: ["IN_TRANSIT", "FAILED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  IN_TRANSIT: ["OUT_FOR_DELIVERY", "DELIVERED", "FAILED", "RETURNED", "PENDING_ADMIN_REVIEW"],
+  OUT_FOR_DELIVERY: ["DELIVERED", "FAILED", "RETURNED"],
+  FAILED: ["OUT_FOR_DELIVERY", "RETURNED", "CANCELLED"],
+  PENDING_ADMIN_REVIEW: ["AWAITING_PICKUP", "CONFIRMED", "PICKED_UP", "IN_TRANSIT", "CANCELLED"],
+  DELIVERED: [], // terminal
+  CANCELLED: [], // terminal
+  RETURNED: [], // terminal
+};
+
 // ─── UPDATE STATUS (Admin) ────────────────────────────────────────────────────
 async function updateShipmentStatus(req, res) {
   const { id } = req.params;
@@ -488,6 +563,19 @@ async function updateShipmentStatus(req, res) {
     include: { customer: { select: { email: true, firstName: true } } },
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  // ── PRD: block invalid state transitions ─────────────────────────────────
+  // Same-status updates are allowed (used for location pings that append a
+  // tracking event without moving the state machine).
+  if (status !== shipment.status) {
+    const allowed = VALID_STATUS_TRANSITIONS[shipment.status] || [];
+    if (!allowed.includes(status)) {
+      throw new ApiError(
+        400,
+        `Invalid status transition: ${shipment.status} → ${status}. Allowed from ${shipment.status}: ${allowed.length ? allowed.join(", ") : "none (terminal state)"}.`,
+      );
+    }
+  }
 
   const updateData = {
     status,
@@ -518,6 +606,10 @@ async function updateShipmentStatus(req, res) {
       },
     }),
   ]);
+
+  // Sprint 4: bust the tracking cache so the public page reflects the new
+  // status immediately (fire-and-forget).
+  invalidateTracking(shipment.trackingNumber);
 
   // Send email notification
   try {
@@ -611,7 +703,18 @@ async function cancelPreview(req, res) {
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  const CANCELLABLE = ["PENDING", "BOOKED", "AWAITING_PICKUP", "CONFIRMED"];
+  // Must match cancelShipment's CANCELLABLE_STATUSES exactly — the preview
+  // previously excluded PICKED_UP and FAILED, so the UI told users those
+  // shipments could not be cancelled even though the confirm endpoint (and
+  // the PRD refund-rules table) allowed it.
+  const CANCELLABLE = [
+    "PENDING",
+    "BOOKED",
+    "AWAITING_PICKUP",
+    "CONFIRMED",
+    "PICKED_UP",
+    "FAILED",
+  ];
   if (!CANCELLABLE.includes(shipment.status)) {
     throw new ApiError(400, "Shipment cannot be cancelled at this stage");
   }
@@ -619,25 +722,29 @@ async function cancelPreview(req, res) {
   const payment = shipment.payments?.[0] || null;
   const paidAmount = payment ? payment.amountKobo / 100 : 0;
 
-  // Refund policy per PRD:
-  // PENDING / BOOKED (not yet paid)      → no refund applicable
-  // AWAITING_PICKUP (paid, not picked up) → 100% full refund
-  // CONFIRMED (paid, being processed)     → 80% partial refund
+  // Refund policy per the PRD refund-rules table (mirrors cancelShipment):
+  // PENDING / BOOKED / AWAITING_PICKUP / CONFIRMED (paid) → 100% full refund
+  // PICKED_UP → 92% (warehouse fee deducted; PRD range 90–95%)
+  // FAILED    → 95% (full minus operator fee)
   let refundPercent = 0;
   let refundReason = "";
   if (!payment || paidAmount === 0) {
     refundPercent = 0;
     refundReason = "No payment made — no refund applicable";
-  } else if (["PENDING", "BOOKED"].includes(shipment.status)) {
-    refundPercent = 100;
-    refundReason = "Full refund — payment made but shipment not yet processed";
-  } else if (shipment.status === "AWAITING_PICKUP") {
+  } else if (
+    ["PENDING", "BOOKED", "AWAITING_PICKUP", "CONFIRMED"].includes(
+      shipment.status,
+    )
+  ) {
     refundPercent = 100;
     refundReason = "Full refund — shipment paid but not yet picked up";
-  } else if (shipment.status === "CONFIRMED") {
-    refundPercent = 80;
+  } else if (shipment.status === "PICKED_UP") {
+    refundPercent = 92;
     refundReason =
-      "Partial refund (80%) — shipment already confirmed for processing";
+      "Partial refund (92%) — package already picked up; warehouse fee deducted";
+  } else if (shipment.status === "FAILED") {
+    refundPercent = 95;
+    refundReason = "Refund minus operator fee — delivery failed";
   }
 
   const refundAmount = Math.floor(paidAmount * (refundPercent / 100));
@@ -745,6 +852,9 @@ async function cancelShipment(req, res) {
     }),
   ]);
 
+  // Sprint 4: status changed to CANCELLED — bust the tracking cache
+  invalidateTracking(shipment.trackingNumber);
+
   // ── Trigger Paystack refund ───────────────────────────────────────────────────
   let refundResult = null;
   if (payment && refundAmount > 0) {
@@ -787,11 +897,10 @@ async function cancelShipment(req, res) {
   );
 }
 
-// ─── ADMIN: LIST ALL SHIPMENTS ────────────────────────────────────────────────
-async function adminListShipments(req, res) {
-  const { page, limit, skip } = getPagination(req.query);
-  const { status, search, assignedTo, fromDate, toDate } = req.query;
-  const subRole = req.user.adminSubRole;
+// ─── Shared: build search/date/status filters (used by both internal admin
+// and Enterprise shipment list endpoints) ─────────────────────────────────────
+function buildShipmentListWhere(query, extraFilter = {}) {
+  const { status, assignedTo, fromDate, toDate, search } = query;
 
   const statusFilter = (() => {
     if (!status) return undefined;
@@ -799,45 +908,8 @@ async function adminListShipments(req, res) {
     return values.length > 1 ? { in: values } : values[0];
   })();
 
-  // ── Org-scoped filtering (Sprint 8 team feature) ─────────────────────────
-  // ROLE_DISPATCHER and ROLE_FINANCE see only their org's shipments:
-  //   → their own shipments (they created) + shipments by other team members
-  //     under the same master.
-  // ROLE_MASTER sees all shipments created by any member of their org.
-  // SUPER_ADMIN / LOGISTICS_MANAGER / ROLE_ADMIN → see everything.
-  let orgFilter = {};
-
-  const ORG_ROLES = ['ROLE_DISPATCHER', 'ROLE_FINANCE', 'ROLE_MASTER', 'ROLE_USER'];
-
-  if (ORG_ROLES.includes(subRole)) {
-    // Find all user IDs who belong to the same organisation
-    // For ROLE_MASTER: masterId is the master themselves
-    // For team members: masterId stored on their user record points to the master
-    const masterId = subRole === 'ROLE_MASTER'
-      ? req.user.id
-      : req.user.masterId;
-
-    if (masterId) {
-      // Get all org members (master + their team)
-      const orgMembers = await prisma.user.findMany({
-        where: {
-          OR: [
-            { id: masterId },                 // the master
-            { masterId: masterId },            // team members
-          ],
-        },
-        select: { id: true },
-      });
-      const memberIds = orgMembers.map(u => u.id);
-      orgFilter = { customerId: { in: memberIds } };
-    } else {
-      // No org link found — show only their own shipments
-      orgFilter = { customerId: req.user.id };
-    }
-  }
-
-  const where = {
-    ...orgFilter,
+  return {
+    ...extraFilter,
     ...(statusFilter && { status: statusFilter }),
     ...(assignedTo && { assignedToId: assignedTo }),
     ...(fromDate || toDate
@@ -858,6 +930,25 @@ async function adminListShipments(req, res) {
       ],
     }),
   };
+}
+
+const SHIPMENT_LIST_INCLUDE = {
+  customer: {
+    select: { id: true, firstName: true, lastName: true, phone: true },
+  },
+  assignedTo: { select: { id: true, firstName: true, lastName: true } },
+  fromCity: { select: { id: true, name: true, state: true } },
+  toCity: { select: { id: true, name: true, state: true } },
+  trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
+};
+
+// ─── INTERNAL ADMIN: LIST ALL SHIPMENTS (platform-wide, unscoped) ────────────
+// role = ADMIN only (SUPER_ADMIN / LOGISTICS_MANAGER / ROLE_ADMIN with
+// canManageShipments — enforced by requireShipmentOpsManagement on the route).
+// Sees every shipment across every customer and every Enterprise tenant.
+async function adminListShipments(req, res) {
+  const { page, limit, skip } = getPagination(req.query);
+  const where = buildShipmentListWhere(req.query);
 
   const [shipments, total] = await Promise.all([
     prisma.shipment.findMany({
@@ -865,15 +956,59 @@ async function adminListShipments(req, res) {
       skip,
       take: limit,
       orderBy: { createdAt: "desc" },
-      include: {
-        customer: {
-          select: { id: true, firstName: true, lastName: true, phone: true },
-        },
-        assignedTo: { select: { id: true, firstName: true, lastName: true } },
-        fromCity: { select: { id: true, name: true, state: true } },
-        toCity: { select: { id: true, name: true, state: true } },
-        trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
+      include: SHIPMENT_LIST_INCLUDE,
+    }),
+    prisma.shipment.count({ where }),
+  ]);
+
+  return res.json({
+    success: true,
+    data: { shipments },
+    meta: buildMeta(total, page, limit),
+  });
+}
+
+// ─── ENTERPRISE: LIST MY COMPANY'S SHIPMENTS (tenant-scoped) ────────────────
+// role = ENTERPRISE only (enforced by requireEnterprise on the route).
+// ROLE_DISPATCHER / ROLE_FINANCE / ROLE_USER see only their own tenant's
+// shipments (their own + teammates under the same ROLE_MASTER).
+// ROLE_MASTER sees every shipment created by any member of their org.
+// This NEVER sees other tenants' or platform-wide data — that's the internal
+// admin endpoint above.
+async function enterpriseListShipments(req, res) {
+  const { page, limit, skip } = getPagination(req.query);
+  const enterpriseRole = req.user.enterpriseRole;
+
+  // For ROLE_MASTER: masterId is the master themselves.
+  // For team members: masterId stored on their user record points to the master.
+  const masterId = enterpriseRole === "ROLE_MASTER" ? req.user.id : req.user.masterId;
+
+  let orgFilter;
+  if (masterId) {
+    const orgMembers = await prisma.user.findMany({
+      where: {
+        OR: [
+          { id: masterId }, // the master
+          { masterId: masterId }, // team members
+        ],
       },
+      select: { id: true },
+    });
+    orgFilter = { customerId: { in: orgMembers.map((u) => u.id) } };
+  } else {
+    // No org link found — show only their own shipments
+    orgFilter = { customerId: req.user.id };
+  }
+
+  const where = buildShipmentListWhere(req.query, orgFilter);
+
+  const [shipments, total] = await Promise.all([
+    prisma.shipment.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      include: SHIPMENT_LIST_INCLUDE,
     }),
     prisma.shipment.count({ where }),
   ]);
@@ -945,6 +1080,9 @@ async function updateDriverLocation(req, res) {
       updatedBy: req.user.id,
     },
   });
+
+  // Sprint 4: new timeline event — bust the tracking cache
+  invalidateTracking(shipment.trackingNumber);
 
   // Broadcast to tracking page subscribers (Socket.IO room = tracking:<number>)
   socketService.emitShipmentUpdate(shipment.trackingNumber, {
@@ -1028,10 +1166,12 @@ async function exportShipmentsCsv(req, res) {
     "Recipient City": s.recipientCity,
     "Recipient State": s.recipientState,
     Weight: s.weight != null ? `${s.weight} ${s.weightUnit ?? "kg"}` : "",
+    // quotedPrice / finalPrice are stored in NAIRA (see payment controller:
+    // amountKobo = quotedPrice * 100) — do not divide by 100 here.
     "Quoted Price (N)":
-      s.quotedPrice != null ? (s.quotedPrice / 100).toFixed(2) : "",
+      s.quotedPrice != null ? Number(s.quotedPrice).toFixed(2) : "",
     "Final Price (N)":
-      s.finalPrice != null ? (s.finalPrice / 100).toFixed(2) : "",
+      s.finalPrice != null ? Number(s.finalPrice).toFixed(2) : "",
     "Pickup Date": s.pickupDate
       ? new Date(s.pickupDate).toISOString().slice(0, 10)
       : "",
@@ -1067,6 +1207,7 @@ module.exports = {
   cancelPreview,
   cancelShipment,
   adminListShipments,
+  enterpriseListShipments,
   getShipmentStats,
   updateDriverLocation,
   exportShipmentsCsv,

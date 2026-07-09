@@ -31,7 +31,8 @@ async function authenticate(req, res, next) {
       lastName: true,
       role: true,
       adminSubRole: true,
-      masterId: true, // org membership
+      enterpriseRole: true,
+      masterId: true, // org membership (Enterprise tenant scoping)
       isActive: true,
       isEmailVerified: true,
       twoFactorEnabled: true,
@@ -79,73 +80,28 @@ function requireLogisticsOrAbove(req, res, next) {
   next();
 }
 
-// ─── PRD v2 RBAC ──────────────────────────────────────────────────────────────
+// ─── Internal Admin Capability RBAC ────────────────────────────────────────────
 //
-// SUPER_ADMIN   → bypasses ALL guards (full system access)
+// SUPER_ADMIN       → bypasses ALL guards (full system access)
 // LOGISTICS_MANAGER → legacy alias for SUPER_ADMIN, same bypass
-// ROLE_DISPATCHER   → named sub-role for shipment operations
-// ROLE_FINANCE      → named sub-role for invoice/payment operations
-// ROLE_AGENT        → named sub-role for ticket/CS operations
-// ROLE_MASTER       → named sub-role for org/team management
-// ROLE_ADMIN        → custom capability flags set by SUPER_ADMIN
+// ROLE_ADMIN        → custom capability flags set by SUPER_ADMIN (never hardcoded)
+//
+// This is exclusively for role = ADMIN (internal BowaGo staff). Enterprise
+// tenant roles (ROLE_MASTER, ROLE_AGENT, ROLE_DISPATCHER, ROLE_FINANCE,
+// ROLE_USER) are governed separately below by requireEnterpriseRole — they
+// are never checked here and never receive AdminRolePermission capabilities.
 //
 // Guard priority:
 //   1. SUPER_ADMIN / LOGISTICS_MANAGER → always pass
-//   2. Explicit named sub-role match   → pass
-//   3. ROLE_ADMIN with matching capability flag → pass
-//   4. Otherwise → 403
+//   2. ROLE_ADMIN with matching capability flag → pass
+//   3. Otherwise → 403
 
 const SUPER_COMPAT = ["SUPER_ADMIN", "LOGISTICS_MANAGER"];
-
-// Map each named sub-role to its equivalent capability flag.
-// When a ROLE_ADMIN has this capability, they can do what the named role does.
-const SUBROLE_TO_CAPABILITY = {
-  ROLE_DISPATCHER: "canManageShipments",
-  ROLE_FINANCE: "canManageInvoices",
-  ROLE_AGENT: "canManageTickets",
-  ROLE_MASTER: "canManageOrganization",
-};
-
-/**
- * requireSubRole('ROLE_DISPATCHER')
- * Allows: SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_DISPATCHER,
- *         and ROLE_ADMIN with canManageShipments capability.
- */
-function requireSubRole(...subRoles) {
-  return async (req, res, next) => {
-    if (req.user.role !== "ADMIN")
-      throw new ApiError(403, "Admin access required");
-
-    // SUPER_ADMIN and LOGISTICS_MANAGER bypass everything
-    if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
-
-    // Named sub-role match
-    if (subRoles.includes(req.user.adminSubRole)) return next();
-
-    // ROLE_ADMIN: check if they have the equivalent capability for any of the required sub-roles
-    if (req.user.adminSubRole === "ROLE_ADMIN") {
-      const requiredCaps = subRoles
-        .map((r) => SUBROLE_TO_CAPABILITY[r])
-        .filter(Boolean);
-
-      if (requiredCaps.length > 0) {
-        const perm = await prisma.adminRolePermission.findUnique({
-          where: { userId: req.user.id },
-        });
-        if (perm && requiredCaps.some((cap) => perm[cap])) return next();
-      }
-    }
-
-    throw new ApiError(403, `Access requires one of: ${subRoles.join(", ")}`);
-  };
-}
 
 /**
  * requireCapability('canManageRates')
  * Allows: SUPER_ADMIN, LOGISTICS_MANAGER,
  *         and ROLE_ADMIN with the matching capability flag.
- * All other named sub-roles (DISPATCHER, FINANCE, etc.) are denied
- * unless SUPER_ADMIN grants them the capability via ROLE_ADMIN assignment.
  */
 function requireCapability(capability) {
   return async (req, res, next) => {
@@ -155,9 +111,7 @@ function requireCapability(capability) {
     // SUPER_ADMIN and LOGISTICS_MANAGER bypass all capability checks
     if (SUPER_COMPAT.includes(req.user.adminSubRole)) return next();
 
-    // Named sub-roles (DISPATCHER, FINANCE, etc.) do NOT have capabilities
-    // unless they are also assigned ROLE_ADMIN with the flag.
-    // Check AdminRolePermission for ROLE_ADMIN only.
+    // Only ROLE_ADMIN can hold capability flags at all.
     if (req.user.adminSubRole !== "ROLE_ADMIN") {
       throw new ApiError(403, `You don't have the "${capability}" capability`);
     }
@@ -184,6 +138,43 @@ const requireBulkNotify = requireCapability("canBulkNotify");
 const requireClaimsAccess = requireCapability("canManageClaims");
 const requireSurchargeManagement = requireCapability("canManageSurcharges");
 const requirePromoManagement = requireCapability("canManagePromos");
+// Internal ops guard for platform-wide shipment operations (warehouse
+// weighing, address-change review, delay-alert broadcast, status updates
+// across ALL customers/enterprises). Distinct from the Enterprise tenant's
+// own ROLE_DISPATCHER, which only ever touches that tenant's shipments.
+const requireShipmentOpsManagement = requireCapability("canManageShipments");
+
+// ─── Enterprise Tenant RBAC ────────────────────────────────────────────────────
+//
+// Completely separate system from Internal Admin above. Enterprise users
+// (role = ENTERPRISE) never touch AdminRolePermission or platform-wide data —
+// every guard here is just a role-name check, since Enterprise permissions
+// are role-based, not capability-based. Internal SUPER_ADMIN/LOGISTICS_MANAGER
+// may optionally be allowed through for support/impersonation-style admin
+// tooling by passing { allowInternalStaff: true }.
+//
+//   requireEnterpriseRole('ROLE_MASTER')
+//   requireEnterpriseRole('ROLE_DISPATCHER', 'ROLE_MASTER')
+function requireEnterpriseRole(...enterpriseRoles) {
+  return (req, res, next) => {
+    if (req.user.role === "ENTERPRISE" && enterpriseRoles.includes(req.user.enterpriseRole)) {
+      return next();
+    }
+    throw new ApiError(
+      403,
+      `Enterprise access requires one of: ${enterpriseRoles.join(", ")}`,
+    );
+  };
+}
+
+// Any authenticated member of an Enterprise tenant, regardless of their
+// specific enterpriseRole (ROLE_MASTER down to ROLE_USER).
+function requireEnterprise(req, res, next) {
+  if (req.user.role !== "ENTERPRISE") {
+    throw new ApiError(403, "Enterprise account required");
+  }
+  next();
+}
 
 // ─── Gap 5: 2FA session guard for sensitive routes (e.g. Invoices) ───────────
 //
@@ -273,6 +264,7 @@ async function optionalAuth(req, res, next) {
         email: true,
         role: true,
         adminSubRole: true,
+        enterpriseRole: true,
         isActive: true,
       },
     });
@@ -289,7 +281,6 @@ module.exports = {
   requireAdmin,
   requireSuperAdmin,
   requireLogisticsOrAbove,
-  requireSubRole,
   requireCapability,
   requireRecentMFA,
   requireRateManagement,
@@ -302,5 +293,8 @@ module.exports = {
   requireClaimsAccess,
   requireSurchargeManagement,
   requirePromoManagement,
+  requireShipmentOpsManagement,
+  requireEnterprise,
+  requireEnterpriseRole,
   optionalAuth,
 };

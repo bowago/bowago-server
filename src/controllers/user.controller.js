@@ -17,6 +17,7 @@ async function getProfile(req, res) {
       avatar: true,
       role: true,
       adminSubRole: true,
+      enterpriseRole: true,
       authProvider: true,
       isEmailVerified: true,
       isPhoneVerified: true,
@@ -62,6 +63,7 @@ async function updateProfile(req, res) {
       avatar: true,
       role: true,
       adminSubRole: true,
+      enterpriseRole: true,
       isEmailVerified: true,
       isPhoneVerified: true,
     },
@@ -223,7 +225,9 @@ async function listUsers(req, res) {
 
   const where = {
     ...(role && { role }),
-    // Sprint 8: filter by adminSubRole to fetch dispatchers for assignment dropdown
+    // Internal admin-only filter — adminSubRole values are now SUPER_ADMIN /
+    // LOGISTICS_MANAGER / ROLE_ADMIN only. Use ?role=ENTERPRISE to list
+    // Enterprise tenant users instead.
     ...(adminSubRole && { adminSubRole }),
     ...(isActive !== undefined && { isActive: isActive === "true" }),
     ...(search && {
@@ -251,6 +255,7 @@ async function listUsers(req, res) {
         avatar: true,
         role: true,
         adminSubRole: true,
+        enterpriseRole: true,
         isActive: true,
         isEmailVerified: true,
         createdAt: true,
@@ -317,6 +322,15 @@ async function setAdminRole(req, res) {
     return success(res, { user }, "User reverted to CUSTOMER role");
   }
 
+  const VALID_INTERNAL_SUBROLES = ["SUPER_ADMIN", "LOGISTICS_MANAGER", "ROLE_ADMIN"];
+  if (adminSubRole && !VALID_INTERNAL_SUBROLES.includes(adminSubRole)) {
+    throw new ApiError(
+      400,
+      `Invalid adminSubRole. Must be one of: ${VALID_INTERNAL_SUBROLES.join(", ")}. ` +
+        `Enterprise roles are assigned via /organization/invite-member, not here.`,
+    );
+  }
+
   const user = await prisma.user.update({
     where: { id },
     data: { role: "ADMIN", adminSubRole: adminSubRole || null },
@@ -341,6 +355,7 @@ async function getUserById(req, res) {
       avatar: true,
       role: true,
       adminSubRole: true,
+      enterpriseRole: true,
       authProvider: true,
       isActive: true,
       isEmailVerified: true,

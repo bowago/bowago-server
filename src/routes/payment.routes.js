@@ -276,7 +276,9 @@ router.get('/my', paymentController.myPayments);
  *       403:
  *         description: Not authorized to refund this payment
  */
-router.post('/:reference/refund', paymentController.refundHandler);
+// Internal finance staff only. Customer/Enterprise refunds go through the
+// shipment cancellation flow, which enforces the PRD refund-rules table.
+router.post('/:reference/refund', requireInvoiceAccess, paymentController.refundHandler);
 
 /**
  * @swagger

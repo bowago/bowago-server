@@ -17,7 +17,7 @@
   "author": "Calstins Ltd",
   "license": "ISC",
   "dependencies": {
-    "@prisma/client": "^6.15.0",
+    "@prisma/client": "^6.19.3",
     "@upstash/qstash": "^2.11.1",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^1.41.3",
@@ -35,7 +35,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "nodemailer": "^8.0.2",
     "pdfkit": "^0.17.2",
-    "prisma": "^6.15.0",
+    "prisma": "^6.19.3",
     "socket.io": "^4.8.3",
     "swagger-jsdoc": "^6.2.8",
     "xlsx": "^0.18.5"

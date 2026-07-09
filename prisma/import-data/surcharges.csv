@@ -1,0 +1,6 @@
+"id","type","label","description","ratePercent","flatAmount","isActive","appliesTo","createdAt","updatedAt"
+"4b6d14e3-c340-465f-af08-0b6a7b10e6dc","REMOTE_AREA","Fuel Increase","Increase in fuel price","3",,"true","ALL","2026-05-11 11:46:19.042","2026-05-11 11:46:41.109"
+"a88b103e-fae5-48e1-9daa-a80eff376163","FUEL","Dan Omo Olowo","saf",,"5000","true","EXPRESS","2026-05-07 07:47:50.8","2026-05-07 09:05:27.737"
+"da92468e-7ea1-415f-a608-150cc91739a4","FUEL","Fuel Surcharge","Covers volatile fuel costs. Adjusted weekly based on pump prices. Currently 5% of base rate.","5","0","true","ALL","2026-06-23 10:56:08.392","2026-06-23 10:56:08.392"
+"ed128a08-cfd2-4c0b-8eff-fc4b747853d5","VAT","VAT (7.5%)","Value Added Tax as mandated by Nigerian law (FIRS). Applied to base shipping price + fuel surcharge.","7.5","0","true","ALL","2026-06-23 10:56:07.823","2026-06-23 10:56:07.823"
+"f61adf93-6b15-49ab-b421-5c15c743008b","REMOTE_AREA","Remote Area Fee","Applies to deliveries beyond standard urban coverage zones. Flat ₦500 per shipment.","0","500","false","STANDARD,ECONOMY","2026-06-23 10:56:08.758","2026-06-23 10:56:08.758"

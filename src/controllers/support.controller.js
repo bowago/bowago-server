@@ -1,6 +1,7 @@
 const { prisma } = require("../config/db");
 const socketService = require("../services/socket.service");
 const { ApiError } = require("../utils/ApiError");
+const { assertOwnedResourceAccess } = require("../utils/access");
 const {
   success,
   created,
@@ -9,25 +10,29 @@ const {
 } = require("../utils/helpers");
 
 // Auto-assign logic based on category (Sprint 6)
-// PRD: PAYMENT/PRICING → ROLE_FINANCE, TRACKING/DELIVERY → ROLE_DISPATCHER, others → ROLE_AGENT
+// Internal CS agents are role = ADMIN, adminSubRole = ROLE_ADMIN with a
+// capability flag — NOT Enterprise roles. (Enterprise ROLE_AGENT/ROLE_FINANCE/
+// ROLE_DISPATCHER belong to tenants and never handle BowaGo's own support queue.)
+// PRD: PAYMENT/PRICING → finance-capable agent, TRACKING/DELIVERY → shipment-ops-capable agent, others → ticket agent
 async function autoAssignTicket(category) {
-  const categoryAgentMap = {
-    PAYMENT: "ROLE_FINANCE",
-    PRICING_DISPUTE: "ROLE_FINANCE",
-    TRACKING: "ROLE_DISPATCHER",
-    DAMAGED_GOODS: "ROLE_AGENT",
-    DELIVERY_ISSUE: "ROLE_DISPATCHER",
-    ACCOUNT: "ROLE_AGENT",
-    OTHER: "ROLE_AGENT",
+  const categoryCapabilityMap = {
+    PAYMENT: "canManageInvoices",
+    PRICING_DISPUTE: "canManageInvoices",
+    TRACKING: "canManageShipments",
+    DAMAGED_GOODS: "canManageTickets",
+    DELIVERY_ISSUE: "canManageShipments",
+    ACCOUNT: "canManageTickets",
+    OTHER: "canManageTickets",
   };
 
-  const requiredSubRole = categoryAgentMap[category] || "ROLE_AGENT";
+  const requiredCapability = categoryCapabilityMap[category] || "canManageTickets";
 
   const agent = await prisma.user.findFirst({
     where: {
       role: "ADMIN",
-      adminSubRole: requiredSubRole,
+      adminSubRole: "ROLE_ADMIN",
       isActive: true,
+      rolePermission: { [requiredCapability]: true },
     },
     orderBy: {
       // Assign to agent with fewest open tickets
@@ -61,13 +66,14 @@ async function createTicket(req, res) {
         404,
         `No shipment found with tracking number "${trackingNumber}"`,
       );
-    // Customers can only raise tickets for their own shipments
-    if (req.user.role === "CUSTOMER" && shipment.customerId !== req.user.id) {
-      throw new ApiError(
-        403,
-        "You can only raise tickets for your own shipments",
-      );
-    }
+    // Ticket can only reference a shipment the caller may access
+    // (own shipment, or same Enterprise tenant). Admins bypass.
+    await assertOwnedResourceAccess(req.user, shipment.customerId, {
+      resource: "Shipment",
+      resourceId: shipment.id,
+      req,
+      message: "You can only raise tickets for your own shipments",
+    });
     resolvedShipmentId = shipment.id;
   }
 
@@ -153,7 +159,9 @@ async function getTicket(req, res) {
     where: { id },
     include: {
       messages: {
-        where: req.user.role === "CUSTOMER" ? { isInternal: false } : {},
+        // Internal agent notes are visible ONLY to internal ADMIN staff —
+        // never to customers or Enterprise tenant users.
+        where: req.user.role === "ADMIN" ? {} : { isInternal: false },
         orderBy: { createdAt: "asc" },
       },
       customer: {
@@ -172,9 +180,11 @@ async function getTicket(req, res) {
 
   if (!ticket) throw new ApiError(404, "Ticket not found");
 
-  if (req.user.role === "CUSTOMER" && ticket.customerId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, ticket.customerId, {
+    resource: "SupportTicket",
+    resourceId: ticket.id,
+    req,
+  });
 
   const flatTicket = {
     ...ticket,
@@ -226,9 +236,11 @@ async function replyToTicket(req, res) {
   const ticket = await prisma.supportTicket.findUnique({ where: { id } });
   if (!ticket) throw new ApiError(404, "Ticket not found");
 
-  if (req.user.role === "CUSTOMER" && ticket.customerId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, ticket.customerId, {
+    resource: "SupportTicket",
+    resourceId: ticket.id,
+    req,
+  });
 
   if (ticket.status === "CLOSED") {
     throw new ApiError(400, "Cannot reply to a closed ticket");
@@ -402,8 +414,10 @@ async function deleteCannedResponse(req, res) {
 
 // ─── Sprint 6: Agent KPI Dashboard ───────────────────────────────────────────
 // Returns per-agent metrics: response time, resolution time, CSAT, volume, re-open rate.
-// ROLE_AGENT sees only their own metrics. SUPER_ADMIN/LOGISTICS_MANAGER/ROLE_ADMIN
-// with canViewAnalytics capability see all agents.
+// Internal CS agents (ROLE_ADMIN with canManageTickets but NOT canViewAnalytics)
+// see only their own metrics. SUPER_ADMIN/LOGISTICS_MANAGER/ROLE_ADMIN with
+// canViewAnalytics see all agents. (Route guard only requires canManageTickets
+// to enter; this function decides the scope.)
 async function getAgentKpi(req, res) {
   const { from, to, agentId, format } = req.query;
 
@@ -412,9 +426,15 @@ async function getAgentKpi(req, res) {
     : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const toDate = to ? new Date(to) : new Date();
 
-  // Agents only see their own data
-  const isAgent = req.user.adminSubRole === "ROLE_AGENT";
-  const scopedAgentId = isAgent ? req.user.id : agentId || undefined;
+  // Determine whether this internal staff member can see everyone's data.
+  let canViewAllAgents = ["SUPER_ADMIN", "LOGISTICS_MANAGER"].includes(req.user.adminSubRole);
+  if (!canViewAllAgents && req.user.adminSubRole === "ROLE_ADMIN") {
+    const perm = await prisma.adminRolePermission.findUnique({ where: { userId: req.user.id } });
+    canViewAllAgents = !!perm?.canViewAnalytics;
+  }
+
+  // Everyone else (rank-and-file support agents) only see their own data
+  const scopedAgentId = canViewAllAgents ? (agentId || undefined) : req.user.id;
 
   const ticketWhere = {
     createdAt: { gte: fromDate, lte: toDate },
@@ -588,7 +608,7 @@ async function getAgentKpi(req, res) {
     return res.send(csv);
   }
 
-  return success(res, { kpi, team }, "Agent KPI report");
+  return success(res, { kpi, team, isSelfScoped: !canViewAllAgents }, "Agent KPI report");
 }
 
 // ─── Sprint 6: Ticket Escalation Job ─────────────────────────────────────────

@@ -160,7 +160,7 @@ router.post('/tickets/:id/reply', supportController.replyToTicket);
  *       403:
  *         description: Admin access required
  */
-router.get('/tickets', requireTicketManagement, supportController.listTickets); // PRD: ROLE_AGENT / canManageTickets
+router.get('/tickets', requireTicketManagement, supportController.listTickets); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -186,7 +186,7 @@ router.get('/tickets', requireTicketManagement, supportController.listTickets); 
  *       200:
  *         description: Ticket updated. Customer notified on RESOLVED.
  */
-router.patch('/tickets/:id', requireTicketManagement, supportController.updateTicket); // PRD: ROLE_AGENT / canManageTickets
+router.patch('/tickets/:id', requireTicketManagement, supportController.updateTicket); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -204,7 +204,7 @@ router.patch('/tickets/:id', requireTicketManagement, supportController.updateTi
  *       200:
  *         description: Canned responses returned
  */
-router.get('/canned-responses', requireTicketManagement, supportController.listCannedResponses); // PRD: ROLE_AGENT
+router.get('/canned-responses', requireTicketManagement, supportController.listCannedResponses); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -227,7 +227,7 @@ router.get('/canned-responses', requireTicketManagement, supportController.listC
  *       201:
  *         description: Canned response created
  */
-router.post('/canned-responses', requireTicketManagement, supportController.createCannedResponse); // PRD: ROLE_AGENT
+router.post('/canned-responses', requireTicketManagement, supportController.createCannedResponse); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -244,7 +244,7 @@ router.post('/canned-responses', requireTicketManagement, supportController.crea
  *       200:
  *         description: Updated
  */
-router.patch('/canned-responses/:id', requireTicketManagement, supportController.updateCannedResponse); // PRD: ROLE_AGENT
+router.patch('/canned-responses/:id', requireTicketManagement, supportController.updateCannedResponse); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -261,7 +261,7 @@ router.patch('/canned-responses/:id', requireTicketManagement, supportController
  *       200:
  *         description: Deleted
  */
-router.delete('/canned-responses/:id', requireTicketManagement, supportController.deleteCannedResponse); // PRD: ROLE_AGENT
+router.delete('/canned-responses/:id', requireTicketManagement, supportController.deleteCannedResponse); // Internal CS agent capability (ROLE_ADMIN + canManageTickets)
 
 /**
  * @swagger
@@ -292,13 +292,9 @@ router.delete('/canned-responses/:id', requireTicketManagement, supportControlle
  *       403:
  *         description: Admin access required
  */
-// Agent KPI — agents see their own data; admins with analytics capability see all
-router.get('/kpi', async (req, res, next) => {
-  // ROLE_AGENT: pass through (controller self-scopes to their own data)
-  if (req.user?.adminSubRole === 'ROLE_AGENT') return next();
-  // Everyone else: require canViewAnalytics capability
-  return requireAnalyticsAccess(req, res, next);
-}, supportController.getAgentKpi);
+// Agent KPI — any internal staff with ticket-management access can view;
+// scope (own data vs everyone's) is decided in the controller via canViewAnalytics.
+router.get('/kpi', requireTicketManagement, supportController.getAgentKpi);
 
 /**
  * @swagger

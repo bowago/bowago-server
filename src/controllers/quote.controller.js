@@ -146,6 +146,17 @@ async function generateQuote(req, res) {
     },
   });
 
+  // ─── Sprint 7: Log TERMS_OF_SERVICE consent ──────────────────────────────
+  // Fire-and-forget (not awaited) so it never delays the response. This was
+  // previously placed AFTER the return statement below, which made it dead
+  // code — consent was never actually recorded at quote time.
+  recordConsent(
+    userId,
+    req.headers["x-session-id"] || null,
+    "TERMS_OF_SERVICE",
+    req,
+  );
+
   return created(
     res,
     {
@@ -178,14 +189,6 @@ async function generateQuote(req, res) {
     "Quote generated",
   );
 
-  // ─── Sprint 7: Log TERMS_OF_SERVICE consent (non-blocking, after response) ─
-  // Fire-and-forget after res is sent — doesn't delay the client
-  await recordConsent(
-    userId,
-    req.headers["x-session-id"] || null,
-    "TERMS_OF_SERVICE",
-    req,
-  );
 }
 
 // ─── Get Quote by ID ──────────────────────────────────────────────────────────
@@ -204,11 +207,39 @@ async function getQuote(req, res) {
 }
 
 // ─── Expire stale quotes (called internally / by cron) ───────────────────────
+// PRD Master Notification Matrix: "Quote Expired → User → In-App → Auto
+// (15 min) → Generate new quote for current rates". Guest quotes (no userId)
+// are expired silently — there is no account to notify.
 async function expireStaleQuotes() {
-  const result = await prisma.quote.updateMany({
+  const stale = await prisma.quote.findMany({
     where: { status: "GENERATED", expiresAt: { lt: new Date() } },
+    select: { id: true, userId: true, originCity: true, destinationCity: true },
+  });
+  if (stale.length === 0) return 0;
+
+  const result = await prisma.quote.updateMany({
+    where: { id: { in: stale.map((q) => q.id) } },
     data: { status: "EXPIRED" },
   });
+
+  // In-app notifications for logged-in owners (non-blocking best-effort)
+  const notifiable = stale.filter((q) => q.userId);
+  if (notifiable.length > 0) {
+    await prisma.notification
+      .createMany({
+        data: notifiable.map((q) => ({
+          userId: q.userId,
+          type: "SYSTEM",
+          title: "Quote Expired",
+          body: `Your quote for ${q.originCity} → ${q.destinationCity} has expired (15-minute limit). Generate a new quote for current rates.`,
+          data: { quoteId: q.id },
+        })),
+      })
+      .catch((err) =>
+        console.error("[Quotes] Failed to create expiry notifications:", err.message),
+      );
+  }
+
   return result.count;
 }
 
@@ -217,6 +248,18 @@ async function cancelQuote(req, res) {
   const { id } = req.params;
   const record = await prisma.quote.findUnique({ where: { id } });
   if (!record) throw new ApiError(404, "Quote not found");
+
+  // Ownership: a quote tied to an account can only be cancelled by that
+  // account (or internal admin staff). Guest quotes (no userId) are
+  // capability-URL access — whoever holds the UUID may cancel.
+  if (
+    record.userId &&
+    record.userId !== req.user.id &&
+    req.user.role !== "ADMIN"
+  ) {
+    throw new ApiError(403, "This quote does not belong to your account");
+  }
+
   if (record.status !== "GENERATED") {
     throw new ApiError(
       400,

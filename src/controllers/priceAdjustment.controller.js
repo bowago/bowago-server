@@ -1,5 +1,6 @@
 const { prisma } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
+const { assertOwnedResourceAccess } = require('../utils/access');
 const { success, created } = require('../utils/helpers');
 const { initializePayment, refundPayment } = require('../services/paystack.service');
 const { calculateShippingCost } = require('../services/pricing.service');
@@ -379,9 +380,11 @@ async function getShipmentAdjustments(req, res) {
   const shipment = await prisma.shipment.findUnique({ where: { id: shipmentId } });
   if (!shipment) throw new ApiError(404, 'Shipment not found');
 
-  if (req.user.role === 'CUSTOMER' && shipment.customerId !== req.user.id) {
-    throw new ApiError(403, 'Access denied');
-  }
+  await assertOwnedResourceAccess(req.user, shipment.customerId, {
+    resource: 'PriceAdjustment',
+    resourceId: shipmentId,
+    req,
+  });
 
   const adjustments = await prisma.priceAdjustment.findMany({
     where: { shipmentId },

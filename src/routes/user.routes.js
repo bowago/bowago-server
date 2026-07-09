@@ -435,8 +435,13 @@ router.patch(
  *             properties:
  *               adminSubRole:
  *                 type: string
- *                 enum: [SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_ADMIN, ROLE_AGENT, ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER, CUSTOMER]
- *                 description: Pass "CUSTOMER" (or set role:"CUSTOMER") to revoke admin access and revert to a regular customer.
+ *                 enum: [SUPER_ADMIN, LOGISTICS_MANAGER, ROLE_ADMIN, CUSTOMER]
+ *                 description: >
+ *                   Internal BowaGo staff sub-role only. Pass "CUSTOMER" (or set
+ *                   role:"CUSTOMER") to revoke admin access and revert to a regular
+ *                   customer. This endpoint can NEVER assign an Enterprise role
+ *                   (ROLE_MASTER, ROLE_AGENT, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER)
+ *                   — those are managed via /organization/invite-member instead.
  *                 example: LOGISTICS_MANAGER
  *               role:
  *                 type: string

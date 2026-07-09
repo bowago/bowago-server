@@ -1,7 +1,7 @@
 // ─── price-adjustment.routes.js ──────────────────────────────────────────────
 const paRouter = require('express').Router();
 const paController = require('../controllers/priceAdjustment.controller');
-const { authenticate, requireSubRole, requireTicketManagement } = require('../middleware/auth');
+const { authenticate, requireShipmentOpsManagement, requireTicketManagement } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -27,7 +27,7 @@ paRouter.use(authenticate);
  *       201: { description: Adjustment created. Customer notified. }
  *       403: { description: Admin access required }
  */
-paRouter.post('/', requireSubRole('ROLE_DISPATCHER'), paController.createPriceAdjustment);
+paRouter.post('/', requireShipmentOpsManagement, paController.createPriceAdjustment);
 
 /**
  * @swagger

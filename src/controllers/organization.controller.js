@@ -1,7 +1,11 @@
 /**
- * Organization Team Invite — Sprint 8
- * PRD: Master Account invites team members; invite expires 7 days.
- * Roles available: ADMIN, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER (viewer).
+ * Enterprise Team Invite — Sprint 8
+ * PRD: ROLE_MASTER invites team members into their Enterprise tenant; invite
+ * expires 7 days. Invited users are created with role = ENTERPRISE and an
+ * enterpriseRole — they are NEVER given role = ADMIN. This endpoint has
+ * nothing to do with Internal BowaGo Administration (see adminRole.controller.js
+ * for that).
+ * Roles available: ROLE_MASTER, ROLE_AGENT, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER.
  */
 
 const crypto = require('crypto');
@@ -12,7 +16,7 @@ const { sendInviteEmail } = require('../config/email');
 
 const INVITE_EXPIRY_DAYS = 7;
 const ALLOWED_INVITE_ROLES = [
-  'ROLE_ADMIN',
+  'ROLE_AGENT',
   'ROLE_DISPATCHER',
   'ROLE_FINANCE',
   'ROLE_USER',
@@ -20,7 +24,8 @@ const ALLOWED_INVITE_ROLES = [
 ];
 
 // ─── POST /organization/invite-member ─────────────────────────────────────────
-// ROLE_MASTER or SUPER_ADMIN invites a new team member.
+// ROLE_MASTER (owner of the tenant) or internal SUPER_ADMIN invites a new
+// Enterprise team member. This never creates internal ADMIN users.
 async function inviteMember(req, res) {
   const { email, role } = req.body;
 
@@ -29,14 +34,17 @@ async function inviteMember(req, res) {
     throw new ApiError(400, `Invalid role. Must be one of: ${ALLOWED_INVITE_ROLES.join(', ')}`);
   }
 
-  // Only ROLE_MASTER and SUPER_ADMIN can send invites
+  // Only the tenant's ROLE_MASTER, or internal platform staff assisting with
+  // onboarding, can send Enterprise invites.
   const inviter = req.user;
-  const canInvite =
-    inviter.adminSubRole === 'SUPER_ADMIN' ||
-    inviter.adminSubRole === 'LOGISTICS_MANAGER' ||
-    inviter.adminSubRole === 'ROLE_MASTER';
-  if (!canInvite) {
-    throw new ApiError(403, 'Only Master users or Super Admins can invite team members.');
+  const isInternalStaff =
+    inviter.role === 'ADMIN' &&
+    (inviter.adminSubRole === 'SUPER_ADMIN' || inviter.adminSubRole === 'LOGISTICS_MANAGER');
+  const isOrgMaster =
+    inviter.role === 'ENTERPRISE' && inviter.enterpriseRole === 'ROLE_MASTER';
+
+  if (!isInternalStaff && !isOrgMaster) {
+    throw new ApiError(403, 'Only your company\'s Master user or Super Admins can invite team members.');
   }
 
   // Check if email already registered
@@ -52,11 +60,19 @@ async function inviteMember(req, res) {
   const token     = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + INVITE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
 
+  // Invites sent by internal staff on behalf of a tenant still need to be
+  // scoped to that tenant's masterId — an org master invites under their own
+  // id, and internal staff must pass masterId explicitly in the body.
+  const masterId = isOrgMaster ? inviter.id : (req.body.masterId || null);
+  if (isInternalStaff && !masterId) {
+    throw new ApiError(400, 'masterId is required when an internal admin sends an Enterprise invite');
+  }
+
   const invite = await prisma.orgInvite.create({
     data: {
       email,
       role,
-      invitedBy: inviter.id,
+      invitedBy: masterId,
       token,
       expiresAt,
       status: 'PENDING',
@@ -110,10 +126,8 @@ async function acceptInvite(req, res) {
   const bcrypt = require('bcryptjs');
   const passwordHash = await bcrypt.hash(password, 12);
 
-  // All org-invited roles are ADMIN-tier in the platform system
-  const isAdminRole = ['SUPER_ADMIN', 'LOGISTICS_MANAGER', 'ROLE_ADMIN', 'ROLE_AGENT',
-    'ROLE_DISPATCHER', 'ROLE_FINANCE', 'ROLE_MASTER', 'ROLE_USER'].includes(invite.role);
-
+  // Every org-invited role is an Enterprise tenant role. Enterprise users are
+  // NEVER given role = ADMIN — that field is reserved for internal BowaGo staff.
   const user = await prisma.user.create({
     data: {
       email:           invite.email,
@@ -121,8 +135,8 @@ async function acceptInvite(req, res) {
       lastName,
       phone:           phone || null,
       passwordHash,
-      role:            isAdminRole ? 'ADMIN' : 'CUSTOMER',
-      adminSubRole:    invite.role,
+      role:            'ENTERPRISE',
+      enterpriseRole:  invite.role,
       // Org membership: stamp masterId so shipments/invoices can be scoped to this org
       masterId:        invite.invitedBy,
       isEmailVerified: true, // Invite flow skips email verification
@@ -153,11 +167,11 @@ async function listInvites(req, res) {
     ...(status && { status }),
   };
 
-  // ROLE_MASTER can only see invites they sent; SUPER_ADMIN sees all
-  if (
-    req.user.adminSubRole === 'ROLE_MASTER' ||
-    req.user.adminSubRole === 'LOGISTICS_MANAGER'
-  ) {
+  // ROLE_MASTER can only see invites they sent; internal SUPER_ADMIN/LOGISTICS_MANAGER see all
+  const isInternalStaff =
+    req.user.role === 'ADMIN' &&
+    (req.user.adminSubRole === 'SUPER_ADMIN' || req.user.adminSubRole === 'LOGISTICS_MANAGER');
+  if (!isInternalStaff) {
     where.invitedBy = req.user.id;
   }
 
@@ -185,11 +199,11 @@ async function cancelInvite(req, res) {
     throw new ApiError(400, 'Only pending invites can be cancelled');
   }
 
-  // ROLE_MASTER can only cancel their own invites
-  if (
-    req.user.adminSubRole === 'ROLE_MASTER' &&
-    invite.invitedBy !== req.user.id
-  ) {
+  // Org master can only cancel invites they sent; internal staff can cancel any
+  const isInternalStaff =
+    req.user.role === 'ADMIN' &&
+    (req.user.adminSubRole === 'SUPER_ADMIN' || req.user.adminSubRole === 'LOGISTICS_MANAGER');
+  if (!isInternalStaff && invite.invitedBy !== req.user.id) {
     throw new ApiError(403, 'You can only cancel invites you sent');
   }
 
@@ -210,6 +224,15 @@ async function resendInvite(req, res) {
   if (!invite) throw new ApiError(404, 'Invite not found');
   if (invite.status === 'ACCEPTED') {
     throw new ApiError(400, 'This invite has already been accepted');
+  }
+
+  // Same isolation rule as cancelInvite (this check was missing here): an org
+  // master may only resend invites they sent; internal staff may resend any.
+  const isInternalStaff =
+    req.user.role === 'ADMIN' &&
+    (req.user.adminSubRole === 'SUPER_ADMIN' || req.user.adminSubRole === 'LOGISTICS_MANAGER');
+  if (!isInternalStaff && invite.invitedBy !== req.user.id) {
+    throw new ApiError(403, 'You can only resend invites you sent');
   }
 
   const token     = crypto.randomBytes(32).toString('hex');
@@ -235,7 +258,10 @@ async function resendInvite(req, res) {
 }
 
 // ─── POST /organization/register ─────────────────────────────────────────────
-// Self-service: any CUSTOMER upgrades their account to a Business (ROLE_MASTER).
+// Self-service: any CUSTOMER upgrades their account to an Enterprise tenant
+// (role = ENTERPRISE, enterpriseRole = ROLE_MASTER). This NEVER touches the
+// internal ADMIN role — an Enterprise owner is not, and never becomes, BowaGo
+// platform staff.
 // PRD Sprint 8: "First user to sign up with company email → ROLE_MASTER"
 // Requires companyName at minimum. Once upgraded the user can invite team members.
 async function registerOrganization(req, res) {
@@ -259,8 +285,12 @@ async function registerOrganization(req, res) {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
   if (!user) throw new ApiError(404, 'User not found');
 
+  if (user.role === 'ADMIN') {
+    throw new ApiError(400, 'Internal BowaGo staff accounts cannot register an Enterprise tenant');
+  }
+
   // Already an organisation — idempotent: just update company details
-  if (user.adminSubRole === 'ROLE_MASTER' || user.role === 'ADMIN') {
+  if (user.role === 'ENTERPRISE' && user.enterpriseRole === 'ROLE_MASTER') {
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data: {
@@ -277,7 +307,7 @@ async function registerOrganization(req, res) {
       },
       select: {
         id: true, firstName: true, lastName: true, email: true,
-        role: true, adminSubRole: true,
+        role: true, enterpriseRole: true,
         companyName: true, industry: true, companyEmail: true,
       },
     });
@@ -285,12 +315,12 @@ async function registerOrganization(req, res) {
       'Business details updated');
   }
 
-  // Upgrade: CUSTOMER → ROLE_MASTER
+  // Upgrade: CUSTOMER → ENTERPRISE / ROLE_MASTER
   const upgraded = await prisma.user.update({
     where: { id: req.user.id },
     data: {
-      role:           'ADMIN',
-      adminSubRole:   'ROLE_MASTER',
+      role:           'ENTERPRISE',
+      enterpriseRole: 'ROLE_MASTER',
       companyName:    companyName.trim(),
       industry:       industry       || null,
       companyEmail:   companyEmail   || null,
@@ -304,7 +334,7 @@ async function registerOrganization(req, res) {
     },
     select: {
       id: true, firstName: true, lastName: true, email: true,
-      role: true, adminSubRole: true,
+      role: true, enterpriseRole: true,
       companyName: true, industry: true, companyEmail: true,
       companyPhone: true, companyWebsite: true,
     },
@@ -331,7 +361,7 @@ async function getOrganizationStatus(req, res) {
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
     select: {
-      id: true, role: true, adminSubRole: true,
+      id: true, role: true, enterpriseRole: true,
       companyName: true, industry: true, companyEmail: true,
       companyPhone: true, companyWebsite: true,
       companyStreet: true, companyCity: true,
@@ -339,7 +369,7 @@ async function getOrganizationStatus(req, res) {
     },
   });
 
-  const isBusiness = user.adminSubRole === 'ROLE_MASTER';
+  const isBusiness = user.role === 'ENTERPRISE' && user.enterpriseRole === 'ROLE_MASTER';
 
   // Count team members invited by this user
   const teamCount = isBusiness
@@ -351,7 +381,7 @@ async function getOrganizationStatus(req, res) {
   return success(res, {
     isBusiness,
     role: user.role,
-    adminSubRole: user.adminSubRole,
+    enterpriseRole: user.enterpriseRole,
     company: isBusiness ? {
       name:     user.companyName,
       industry: user.industry,

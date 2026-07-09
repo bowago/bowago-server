@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const orgController = require('../controllers/organization.controller');
-const { authenticate, requireLogisticsOrAbove, requireSubRole } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -32,7 +32,7 @@ const { authenticate, requireLogisticsOrAbove, requireSubRole } = require('../mi
  *                 example: "dispatcher@company.ng"
  *               role:
  *                 type: string
- *                 enum: [ROLE_ADMIN, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER, ROLE_MASTER]
+ *                 enum: [ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_AGENT, ROLE_USER]
  *                 example: "ROLE_DISPATCHER"
  *     responses:
  *       201:

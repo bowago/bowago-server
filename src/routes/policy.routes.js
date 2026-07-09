@@ -9,7 +9,17 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  *   description: "Sprint 2 Story 9.4 - T&C, refund and pricing policies at payment and quote. Sprint 5 Story 11.5 - Packaging guide from booking confirmation."
  */
 
-// ─── POLICIES ─────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// PUBLIC ROUTES — all registered before the admin auth gate below.
+// FIX: packaging-guides GET routes used to be registered AFTER
+// `router.use(authenticate, requireLogisticsOrAbove)`, which meant the public
+// packaging guide page could never load them (403). And GET /:key used to be
+// registered BEFORE GET /packaging-guides, so Express matched
+// "/packaging-guides" as key="packaging-guides" and the real handler was
+// unreachable. Both fixed by this ordering.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ─── POLICIES (list) ────────────────────────────────────────────────────────────
 
 /**
  * @swagger
@@ -41,98 +51,7 @@ const { authenticate, requireLogisticsOrAbove } = require('../middleware/auth');
  */
 router.get('/', policyController.listPolicies);
 
-/**
- * @swagger
- * /policies/{key}:
- *   get:
- *     summary: Get full policy content by key
- *     tags: [Policies & Guides]
- *     security: []
- *     description: >
- *       Fetches full policy body (Markdown or HTML) by key.
- *       Standard keys: terms_of_service | refund_policy | pricing_policy | liability | privacy_policy
- *       Show this at the point of quote generation and at the payment checkout screen (Story 9.4).
- *     parameters:
- *       - in: path
- *         name: key
- *         required: true
- *         schema: { type: string }
- *         examples:
- *           terms: { value: terms_of_service, summary: Terms of Service }
- *           refund: { value: refund_policy, summary: Refund Policy }
- *           pricing: { value: pricing_policy, summary: Pricing Policy }
- *           liability: { value: liability, summary: Liability Statement }
- *     responses:
- *       200:
- *         description: Policy content returned
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: object
- *                   properties:
- *                     policy:
- *                       type: object
- *                       properties:
- *                         key: { type: string }
- *                         title: { type: string }
- *                         body: { type: string, description: "Markdown or HTML content" }
- *                         updatedAt: { type: string, format: date-time }
- *       404:
- *         description: Policy not found
- */
-router.get('/:key', policyController.getPolicy);
-
-// ─── Admin policy management ──────────────────────────────────────────────────
-router.use(authenticate, requireLogisticsOrAbove);
-
-/**
- * @swagger
- * /policies:
- *   post:
- *     summary: Create or update a policy (Admin)
- *     tags: [Policies & Guides]
- *     description: >
- *       Upserts a policy by key. Use the same key to update existing content.
- *       Recommended keys: terms_of_service, refund_policy, pricing_policy, liability, privacy_policy
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [key, title, body]
- *             properties:
- *               key: { type: string, example: terms_of_service }
- *               title: { type: string, example: "Terms of Service" }
- *               body: { type: string, description: "Markdown or HTML. Rendered on frontend." }
- *               isActive: { type: boolean, default: true }
- *     responses:
- *       201:
- *         description: Policy saved
- */
-router.post('/', policyController.upsertPolicy);
-
-/**
- * @swagger
- * /policies/{key}:
- *   delete:
- *     summary: Deactivate a policy (Admin)
- *     tags: [Policies & Guides]
- *     parameters:
- *       - in: path
- *         name: key
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Policy deactivated
- */
-router.delete('/:key', policyController.deletePolicy);
-
-// ─── PACKAGING GUIDES ─────────────────────────────────────────────────────────
+// ─── PACKAGING GUIDES (list + single) — must come before GET /:key ────────────
 
 /**
  * @swagger
@@ -190,6 +109,105 @@ router.get('/packaging-guides', policyController.listPackagingGuides);
  *         description: Not found
  */
 router.get('/packaging-guides/:id', policyController.getPackagingGuide);
+
+// ─── POLICIES (single, by key) ─────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /policies/{key}:
+ *   get:
+ *     summary: Get full policy content by key
+ *     tags: [Policies & Guides]
+ *     security: []
+ *     description: >
+ *       Fetches full policy body (Markdown or HTML) by key.
+ *       Standard keys: terms_of_service | refund_policy | pricing_policy | liability | privacy_policy
+ *       Show this at the point of quote generation and at the payment checkout screen (Story 9.4).
+ *     parameters:
+ *       - in: path
+ *         name: key
+ *         required: true
+ *         schema: { type: string }
+ *         examples:
+ *           terms: { value: terms_of_service, summary: Terms of Service }
+ *           refund: { value: refund_policy, summary: Refund Policy }
+ *           pricing: { value: pricing_policy, summary: Pricing Policy }
+ *           liability: { value: liability, summary: Liability Statement }
+ *     responses:
+ *       200:
+ *         description: Policy content returned
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     policy:
+ *                       type: object
+ *                       properties:
+ *                         key: { type: string }
+ *                         title: { type: string }
+ *                         body: { type: string, description: "Markdown or HTML content" }
+ *                         updatedAt: { type: string, format: date-time }
+ *       404:
+ *         description: Policy not found
+ */
+router.get('/:key', policyController.getPolicy);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN ROUTES — everything below requires internal BowaGo staff (ADMIN role).
+// Content management for policies + packaging guides is exposed to whichever
+// internal admin roles requireLogisticsOrAbove allows (SUPER_ADMIN,
+// LOGISTICS_MANAGER, ROLE_ADMIN) — the "business admin" content-management
+// role described in the dashboard.
+// ══════════════════════════════════════════════════════════════════════════════
+router.use(authenticate, requireLogisticsOrAbove);
+
+/**
+ * @swagger
+ * /policies:
+ *   post:
+ *     summary: Create or update a policy (Admin)
+ *     tags: [Policies & Guides]
+ *     description: >
+ *       Upserts a policy by key. Use the same key to update existing content.
+ *       Recommended keys: terms_of_service, refund_policy, pricing_policy, liability, privacy_policy
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [key, title, body]
+ *             properties:
+ *               key: { type: string, example: terms_of_service }
+ *               title: { type: string, example: "Terms of Service" }
+ *               body: { type: string, description: "Markdown or HTML. Rendered on frontend." }
+ *               isActive: { type: boolean, default: true }
+ *     responses:
+ *       201:
+ *         description: Policy saved
+ */
+router.post('/', policyController.upsertPolicy);
+
+/**
+ * @swagger
+ * /policies/{key}:
+ *   delete:
+ *     summary: Deactivate a policy (Admin)
+ *     tags: [Policies & Guides]
+ *     parameters:
+ *       - in: path
+ *         name: key
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Policy deactivated
+ */
+router.delete('/:key', policyController.deletePolicy);
 
 /**
  * @swagger

@@ -1,5 +1,6 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
+const { assertOwnedResourceAccess, getOrgMemberIds } = require("../utils/access");
 const { success, getPagination, buildMeta } = require("../utils/helpers");
 const {
   generateInvoicePDF,
@@ -75,13 +76,33 @@ function getSurchargeBreakdown(shipment) {
     : [];
 }
 
+// Roles within an Enterprise tenant that may see the WHOLE company's
+// invoices, per PRD Sprint 8 ("FINANCE: VIEW invoices (company)"; ROLE_MASTER
+// sees all company data). Other tenant roles see only their own.
+const ENTERPRISE_FINANCE_ROLES = ["ROLE_MASTER", "ROLE_FINANCE"];
+
+// Resolve the userId filter for "my" invoice/summary endpoints: personal for
+// customers, company-wide for Enterprise finance-capable roles.
+async function resolveInvoiceOwnerFilter(user) {
+  if (
+    user.role === "ENTERPRISE" &&
+    ENTERPRISE_FINANCE_ROLES.includes(user.enterpriseRole)
+  ) {
+    const memberIds = await getOrgMemberIds(user);
+    if (memberIds && memberIds.length > 0) return { in: memberIds };
+  }
+  return user.id;
+}
+
 // ─── GET /invoices/my — Customer invoice list ─────────────────────────────────
+// Enterprise ROLE_MASTER / ROLE_FINANCE receive their whole company's
+// invoices here (PRD Sprint 8); everyone else receives only their own.
 async function myInvoices(req, res) {
   const { page, limit, skip } = getPagination(req.query);
   const { status } = req.query;
 
   const where = {
-    userId: req.user.id,
+    userId: await resolveInvoiceOwnerFilter(req.user),
     ...(status && { status }),
   };
 
@@ -152,10 +173,13 @@ async function getInvoice(req, res) {
 
   if (!payment) throw new ApiError(404, "Invoice not found");
 
-  // Customers can only see their own
-  if (req.user.role === "CUSTOMER" && payment.userId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  // Ownership check for ALL non-admin roles (Customer + Enterprise tenant
+  // isolation). Denied attempts are security-logged per PRD Sprint 2.
+  await assertOwnedResourceAccess(req.user, payment.userId, {
+    resource: "Invoice",
+    resourceId: payment.id,
+    req,
+  });
 
   return success(res, {
     invoice: {
@@ -188,9 +212,11 @@ async function downloadInvoicePDF(req, res) {
   });
 
   if (!payment) throw new ApiError(404, "Invoice not found");
-  if (req.user.role === "CUSTOMER" && payment.userId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, payment.userId, {
+    resource: "Invoice",
+    resourceId: payment.id,
+    req,
+  });
 
   const invoiceNumber = buildInvoiceNumber(payment);
 
@@ -265,9 +291,11 @@ async function emailInvoice(req, res) {
   });
 
   if (!payment) throw new ApiError(404, "Invoice not found");
-  if (req.user.role === "CUSTOMER" && payment.userId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, payment.userId, {
+    resource: "Invoice",
+    resourceId: payment.id,
+    req,
+  });
 
   const invoiceNumber = buildInvoiceNumber(payment);
 
@@ -298,9 +326,11 @@ async function downloadShippingLabel(req, res) {
   const shipment = await prisma.shipment.findUnique({ where: { id } });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  if (req.user.role === "CUSTOMER" && shipment.customerId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, shipment.customerId, {
+    resource: "ShippingLabel",
+    resourceId: shipment.id,
+    req,
+  });
 
   const pdfBuffer = await generateShippingLabelPDF(shipment);
 
@@ -357,9 +387,11 @@ async function downloadBookingConfirmation(req, res) {
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  if (req.user.role === "CUSTOMER" && shipment.customerId !== req.user.id) {
-    throw new ApiError(403, "Access denied");
-  }
+  await assertOwnedResourceAccess(req.user, shipment.customerId, {
+    resource: "BookingConfirmation",
+    resourceId: shipment.id,
+    req,
+  });
 
   const surchargeBreakdown = getSurchargeBreakdown(shipment);
 
@@ -479,7 +511,9 @@ async function financialOverview(req, res) {
 // ─── Customer Invoice Summary ────────────────────────────────────────────────
 // Returns payment stats scoped to the authenticated customer only.
 async function myInvoiceSummary(req, res) {
-  const userId = req.user.id;
+  // Same scoping rule as myInvoices: company-wide for Enterprise
+  // ROLE_MASTER / ROLE_FINANCE, personal for everyone else.
+  const userId = await resolveInvoiceOwnerFilter(req.user);
 
   const [paid, pending, refunded, totalSpent] = await Promise.all([
     prisma.payment.count({ where: { userId, status: "PAID" } }),

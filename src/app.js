@@ -32,9 +32,15 @@ const faqRoutes = require("./routes/faq.routes");
 const delayAlertRoutes = require("./routes/delayAlert.routes");
 const invoiceRoutes = require("./routes/invoice.routes");
 const contractRateRoutes = require("./routes/contractRate.routes");
-const promoRateRoutes = require("./routes/promoRate.routes");
 const quoteRoutes = require("./routes/quote.routes");
 const adminRoleRoutes = require("./routes/adminRole.routes");
+// FIX: these two route files existed and were fully implemented but were
+// never require()'d or mounted anywhere — /policies, /packaging-guides, and
+// /promo-codes were completely dead, 404ing on every request. Nothing in
+// the frontend using them (packaging-guide page, policy pages, promo code
+// checkout flow) could ever have worked.
+const policyRoutes = require("./routes/policy.routes");
+const promoCodeRoutes = require("./routes/promoCode.routes");
 
 const app = express();
 
@@ -299,10 +305,11 @@ app.use("/api/v1/faq", faqRoutes);
 app.use("/api/v1/delay-alerts", delayAlertRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
 app.use("/api/v1/contract-rates", contractRateRoutes);
-app.use("/api/v1/promo-rates", promoRateRoutes);
 app.use("/api/v1/quotes", quoteRoutes);
 app.use("/api/v1/admin/roles", adminRoleRoutes);
 app.use("/api/v1/organization", require("./routes/organization.routes"));
+app.use("/api/v1/policies", policyRoutes);
+app.use("/api/v1/promo-codes", promoCodeRoutes);
 
 app.get("/", (req, res) => {
   res.status(200).json({

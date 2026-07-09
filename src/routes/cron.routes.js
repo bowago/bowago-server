@@ -18,6 +18,7 @@ const {
 } = require("../services/priceAdjustmentScheduler.service");
 const { runEscalationJob } = require("../controllers/support.controller");
 const { runSLABreachSweep } = require("../services/slaBreachScheduler.service");
+const { expireStaleQuotes } = require("../controllers/quote.controller");
 
 const receiver =
   process.env.QSTASH_CURRENT_SIGNING_KEY && process.env.QSTASH_NEXT_SIGNING_KEY
@@ -58,6 +59,22 @@ async function verifyQStashSignature(req, res, next) {
     return res.status(401).json({ error: "Invalid QStash signature" });
   }
 }
+
+/**
+ * POST /api/v1/cron/expire-quotes
+ * Marks GENERATED quotes past their 15-minute expiry as EXPIRED and creates
+ * the PRD "Quote Expired" in-app notification for logged-in owners.
+ * Suggested QStash schedule: every 5 minutes → "*\/5 * * * *"
+ */
+router.post("/expire-quotes", verifyQStashSignature, async (req, res) => {
+  try {
+    const count = await expireStaleQuotes();
+    return res.json({ ok: true, expired: count });
+  } catch (err) {
+    console.error("[Cron] expire-quotes failed:", err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 /**
  * POST /api/v1/cron/sweep-price-adjustments

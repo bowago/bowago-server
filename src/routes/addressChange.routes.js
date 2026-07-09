@@ -1,7 +1,7 @@
 // ─── address-change.routes.js ─────────────────────────────────────────────────
 const acRouter = require('express').Router();
 const acController = require('../controllers/addressChange.controller');
-const { authenticate, requireLogisticsOrAbove, requireSubRole } = require('../middleware/auth');
+const { authenticate, requireLogisticsOrAbove, requireShipmentOpsManagement } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -105,6 +105,6 @@ acRouter.get('/', requireLogisticsOrAbove, acController.listAddressChangeRequest
  *       400:
  *         description: Request already reviewed
  */
-acRouter.patch('/:id/review', requireSubRole('ROLE_DISPATCHER'), acController.reviewAddressChange); // PRD: DISPATCHER approves address changes
+acRouter.patch('/:id/review', requireShipmentOpsManagement, acController.reviewAddressChange); // Internal ops: SUPER_ADMIN/LOGISTICS_MANAGER/ROLE_ADMIN(canManageShipments) approve address changes
 
 module.exports = acRouter;

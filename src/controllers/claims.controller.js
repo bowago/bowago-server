@@ -1,5 +1,6 @@
 const { prisma } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
+const { assertOwnedResourceAccess } = require('../utils/access');
 const { success, created, getPagination, buildMeta } = require('../utils/helpers');
 
 // ─── Customer: File a claim ───────────────────────────────────────────────────
@@ -24,6 +25,40 @@ async function fileClaim(req, res) {
     where: { shipmentId, userId: req.user.id, status: { not: 'REJECTED' } },
   });
   if (existing) throw new ApiError(409, 'A claim already exists for this shipment');
+
+  // ─── PRD Sprint 7 claim validation ────────────────────────────────────────
+  // description 20–1000 chars
+  const desc = String(description || '').trim();
+  if (desc.length < 20 || desc.length > 1000) {
+    throw new ApiError(400, 'Description must be between 20 and 1000 characters');
+  }
+
+  // claimAmount must be a positive number and ≤ declaredValue
+  const declared = parseFloat(declaredValue);
+  const amount = parseFloat(claimAmount);
+  if (!Number.isFinite(declared) || declared <= 0) {
+    throw new ApiError(400, 'declaredValue must be a positive number');
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new ApiError(400, 'claimAmount must be a positive number');
+  }
+  if (amount > declared) {
+    throw new ApiError(400, 'Claim amount cannot exceed the declared value');
+  }
+
+  // claimAmount ≤ insurable amount — if the shipment was insured, the payout
+  // cap is the insured value declared at booking time.
+  if (shipment.requiresInsurance && shipment.insuranceValue && amount > shipment.insuranceValue) {
+    throw new ApiError(
+      400,
+      `Claim amount cannot exceed the insured value of ₦${Number(shipment.insuranceValue).toLocaleString()}`,
+    );
+  }
+
+  // Evidence images: min 1, max 5 (max enforced by multer at the route).
+  if (!req.files || req.files.length === 0) {
+    throw new ApiError(400, 'At least one evidence photo is required to file a claim');
+  }
 
   const claim = await prisma.claim.create({
     data: {
@@ -90,9 +125,11 @@ async function getClaim(req, res) {
   });
 
   if (!claim) throw new ApiError(404, 'Claim not found');
-  if (req.user.role === 'CUSTOMER' && claim.userId !== req.user.id) {
-    throw new ApiError(403, 'Access denied');
-  }
+  await assertOwnedResourceAccess(req.user, claim.userId, {
+    resource: 'Claim',
+    resourceId: claim.id,
+    req,
+  });
 
   return success(res, { claim });
 }

@@ -65,7 +65,12 @@ async function applySurcharges(basePrice, serviceType = 'STANDARD', options = {}
   const breakdown = [];
   let totalSurcharge = 0;
 
+  // ── Pass 1: all non-VAT surcharges ────────────────────────────────────────
+  // PRD Sprint 1 formula: VAT = (base_price + fuel_surcharge + remote_area_fee)
+  // × rate. Insurance premium is explicitly NOT subject to VAT, so VAT must be
+  // computed AFTER fuel/remote amounts are known — not as a flat % of base.
   for (const s of surcharges) {
+    if (s.type === 'VAT') continue; // handled in pass 2
     if (s.type === 'FRAGILE'   && !options.isFragile)         continue;
     if (s.type === 'INSURANCE' && !options.requiresInsurance) continue;
 
@@ -81,6 +86,26 @@ async function applySurcharges(basePrice, serviceType = 'STANDARD', options = {}
     if (amount > 0) {
       breakdown.push({ type: s.type, label: s.label, description: s.description, amount });
       totalSurcharge += amount;
+    }
+  }
+
+  // ── Pass 2: VAT on (base + fuel + remote area) only ──────────────────────
+  const vatRow = surcharges.find((s) => s.type === 'VAT');
+  if (vatRow) {
+    const fuelAmount   = breakdown.find((b) => b.type === 'FUEL')?.amount || 0;
+    const remoteAmount = breakdown.find((b) => b.type === 'REMOTE_AREA')?.amount || 0;
+    const vatBase = basePrice + fuelAmount + remoteAmount;
+
+    let vatAmount = 0;
+    if (vatRow.ratePercent) {
+      vatAmount = Math.round(vatBase * (vatRow.ratePercent / 100));
+    } else if (vatRow.flatAmount) {
+      vatAmount = vatRow.flatAmount;
+    }
+
+    if (vatAmount > 0) {
+      breakdown.push({ type: vatRow.type, label: vatRow.label, description: vatRow.description, amount: vatAmount });
+      totalSurcharge += vatAmount;
     }
   }
 

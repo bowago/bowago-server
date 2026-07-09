@@ -10,22 +10,33 @@ datasource db {
 
 // ─── ENUMS ───────────────────────────────────────────────────────────────────
 
+// Top-level "which world does this user belong to" switch.
+// CUSTOMER    → Customer System (end user, no company)
+// ADMIN       → Internal BowaGo Administration (platform staff)
+// ENTERPRISE  → Enterprise System (BowaGo-as-a-Service tenant user)
 enum UserRole {
   CUSTOMER
   ADMIN
+  ENTERPRISE
 }
 
+// Internal BowaGo staff roles ONLY. Never used for Enterprise tenants.
+// Governs access to platform-wide business operations (rates, zones,
+// pricing, enterprise management, platform settings, etc).
 enum AdminSubRole {
-  // BowaGO internal staff roles (SUPER_ADMIN creates/assigns these)
   SUPER_ADMIN           // Full system access — creates custom admin roles
   LOGISTICS_MANAGER     // Legacy: maps to ROLE_ADMIN in PRD v2 — kept for FE compat
-  // PRD v2 roles — custom admin roles assignable by SUPER_ADMIN
-  ROLE_ADMIN            // Defined role given by SUPER_ADMIN (capabilities set in AdminRolePermission)
-  ROLE_AGENT            // CS rep: read/update tickets, read shipments, create notes, view customers
-  ROLE_MASTER           // Company master: manage team, assign roles, view all company data
-  ROLE_DISPATCHER       // Company team: create shipments, update status, read invoices
-  ROLE_FINANCE          // Company accountant: view invoices, create payments, view reports
-  ROLE_USER             // End customer — same as CUSTOMER role but via company context
+  ROLE_ADMIN            // Custom role given by SUPER_ADMIN (capabilities set in AdminRolePermission)
+}
+
+// Enterprise tenant roles ONLY. Scoped entirely to the user's own company
+// (via masterId). Never grants access to platform administration.
+enum EnterpriseRole {
+  ROLE_MASTER           // Company owner/admin: invite/remove users, assign roles, manage company
+  ROLE_AGENT            // Company CS rep: customer-related workflows only
+  ROLE_DISPATCHER       // Company shipment ops: create/book/update/track shipments
+  ROLE_FINANCE          // Company finance: invoices, payments, financial reports
+  ROLE_USER             // Standard company user: quotes, shipments, tracking, own invoices
 }
 
 enum AuthProvider {
@@ -163,7 +174,8 @@ model User {
   avatar           String?
   avatarPublicId   String?
   role             UserRole      @default(CUSTOMER)
-  adminSubRole     AdminSubRole?
+  adminSubRole     AdminSubRole?     // set ONLY when role = ADMIN
+  enterpriseRole   EnterpriseRole?  // set ONLY when role = ENTERPRISE
   authProvider     AuthProvider  @default(EMAIL)
   googleId         String?       @unique
   appleId          String?       @unique
@@ -187,9 +199,11 @@ model User {
   companyCountry   String?
   companyZip       String?
 
-  // ─── Organisation membership (Sprint 8 team feature) ─────────────────────
-  // Set when a team member accepts an org invite. Points to the ROLE_MASTER
-  // user who invited them. Used to scope shipments, invoices, etc. to the org.
+  // ─── Enterprise org membership (Sprint 8 team feature) ───────────────────
+  // Set when a team member accepts an org invite. Points to the ENTERPRISE
+  // user with enterpriseRole = ROLE_MASTER who owns the org. Used to scope
+  // shipments, invoices, etc. to the tenant. Only meaningful when
+  // role = ENTERPRISE.
   masterId         String?   // FK → User.id of the ROLE_MASTER who owns the org
 
   addresses           Address[]
@@ -855,32 +869,6 @@ model ContractRate {
   @@map("contract_rates")
 }
 
-// Sprint 1 / Story 8.4 — Admin Promo Rates (zone/service-based promotional pricing bands)
-// Distinct from PromoCode (customer-facing coupon codes).
-// PromoRate = time-limited price discounts applied automatically by the pricing engine.
-model PromoRate {
-  id               String      @id @default(uuid())
-  code             String      @unique
-  label            String?
-  description      String?
-  discountPercent  Float?
-  flatDiscount     Float?
-  serviceType      ServiceType?
-  zone             Int?
-  minWeightKg      Float?
-  maxUsageCount    Int?
-  usageCount       Int         @default(0)
-  isActive         Boolean     @default(true)
-  validFrom        DateTime?
-  validUntil       DateTime?
-  createdBy        String?
-
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
-
-  @@map("promo_rates")
-}
-
 // Sprint 2 — Promo Codes (customer-facing codes e.g. LAUNCH20)
 model PromoCode {
   id              String    @id @default(uuid())
@@ -1086,7 +1074,7 @@ model LoginAttempt {
 model OrgInvite {
   id          String    @id @default(uuid())
   email       String
-  role        String    @default("ROLE_DISPATCHER") // AdminSubRole string
+  role        String    @default("ROLE_DISPATCHER") // EnterpriseRole string
   invitedBy   String    // User.id of master who sent invite
   token       String    @unique
   expiresAt   DateTime

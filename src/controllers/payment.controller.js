@@ -256,12 +256,26 @@ async function refundHandler(req, res) {
   const { reference } = req.params;
   const { amountNaira } = req.body;
 
-  // Only admin or the payment owner can refund
-  const payment = await prisma.payment.findUnique({ where: { reference } });
+  // PRD Sprint 3: refunds are governed by the shipment-status refund rules
+  // table. Customers/Enterprise users must go through the cancellation flow
+  // (POST /shipments/:id/cancel) which enforces those rules and calculates
+  // the correct refund percentage. This direct endpoint is for internal
+  // finance staff only (guarded at the route with requireInvoiceAccess) —
+  // it previously let ANY payment owner refund themselves at any status,
+  // including IN_TRANSIT and DELIVERED, bypassing the PRD refund rules.
+  const payment = await prisma.payment.findUnique({
+    where: { reference },
+    include: { shipment: { select: { id: true, status: true, trackingNumber: true } } },
+  });
   if (!payment) throw new ApiError(404, "Payment not found");
 
-  if (req.user.role !== "ADMIN" && payment.userId !== req.user.id) {
-    throw new ApiError(403, "Not authorized to refund this payment");
+  // Even for finance staff, DELIVERED shipments follow the claims process —
+  // the refund rules table says "File damage claim" for delivered shipments.
+  if (payment.shipment?.status === "DELIVERED") {
+    throw new ApiError(
+      400,
+      "Delivered shipments cannot be refunded directly. Resolve via the claims process instead.",
+    );
   }
 
   const refunded = await refundPayment(reference, amountNaira || null);

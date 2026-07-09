@@ -470,7 +470,6 @@ async function getPricingStats(req, res) {
     totalRegisteredCity,
     totalContractRate,
     totalStandardRate,
-    totalPromoRate,
     totalBoxDimension,
   ] = await Promise.all([
     // Active zone pairs in the matrix
@@ -481,8 +480,6 @@ async function getPricingStats(req, res) {
     prisma.contractRate.count({ where: { isActive: true } }),
     // Standard price bands (active)
     prisma.priceBand.count({ where: { isActive: true } }),
-    // Admin promo rates (active)
-    prisma.promoRate.count({ where: { isActive: true } }),
     // Box dimension types
     prisma.boxDimension.count(),
   ]);
@@ -492,7 +489,6 @@ async function getPricingStats(req, res) {
     totalRegisteredCity,
     totalContractRate,
     totalStandardRate,
-    totalPromoRate,
     totalBoxDimension,
   }, 'Pricing stats returned');
 }
@@ -507,6 +503,13 @@ async function rollbackPriceBand(req, res) {
   if (log.entityType !== 'PriceBand') throw new ApiError(400, 'Can only rollback PriceBand entries');
 
   const prev = log.previousValue;
+
+  // Capture the CURRENT state BEFORE applying the rollback — this is the
+  // previousValue for the new audit entry. (It was previously re-read AFTER
+  // the update, which recorded the post-rollback state as "previous" and
+  // corrupted the audit trail.)
+  const current = await prisma.priceBand.findUnique({ where: { id: log.entityId } });
+  if (!current) throw new ApiError(404, 'Price band no longer exists');
 
   const band = await prisma.priceBand.update({
     where: { id: log.entityId },
@@ -524,14 +527,16 @@ async function rollbackPriceBand(req, res) {
     },
   });
 
+  // PRD Sprint 8: rollback is its own immutable audit action — it creates a
+  // NEW version entry; nothing is deleted.
   await prisma.priceAuditLog.create({
     data: {
       entityType: 'PriceBand', entityId: log.entityId,
-      action: 'UPDATE',
-      previousValue: await prisma.priceBand.findUnique({ where: { id: log.entityId } }),
+      action: 'ROLLBACK',
+      previousValue: current,
       newValue: band,
       changedBy: req.user.id,
-      reason: `Rolled back to previous value via audit log ${auditLogId}`,
+      reason: req.body?.reason || `Rolled back to previous value via audit log ${auditLogId}`,
     },
   });
 
@@ -623,6 +628,26 @@ async function exportPricingSheet(req, res) {
   const cityHeader = ['Name', 'Region', 'State'];
   const cityRows = [cityHeader, ...cities.map((c) => [c.name, c.region, c.state])];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cityRows), 'Cities');
+
+  // ── Coverage Gaps sheet ──
+  // Lists every city-pair with NO zone and/or NO distance configured, so a
+  // gap is visible right in the file instead of silently showing up later
+  // as "No route found" on the live site. Every city should route to every
+  // OTHER city AND to itself (local/intra-city delivery is a legitimate,
+  // separately-configurable route) — this is the N×N coverage check.
+  const gapRows = [['From City', 'To City', 'Missing Zone?', 'Missing Distance?']];
+  for (const from of cities) {
+    for (const to of cities) {
+      const hasZone = zoneLookup.has(`${from.name}|${to.name}`);
+      const hasKm = kmLookup.has(`${from.name}|${to.name}`);
+      if (!hasZone || !hasKm) {
+        gapRows.push([from.name, to.name, hasZone ? '' : 'YES', hasKm ? '' : 'YES']);
+      }
+    }
+  }
+  if (gapRows.length > 1) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(gapRows), 'Coverage Gaps');
+  }
 
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = `BowaGO-Pricing-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
@@ -982,6 +1007,33 @@ async function importPricingSheet(req, res) {
           results.errors.push(`PriceBand zone${b.zone} ${b.serviceType} ${b.kgStr}: ${r.reason?.message}`);
         }
       });
+    }
+  }
+
+  // ─── Gap audit ────────────────────────────────────────────────────────────
+  // The import above silently `continue`s past any blank cell in the Zone
+  // Matrix / Matrix by KM sheets — a typo'd or duplicate city name, or a
+  // genuinely blank cell in the source spreadsheet, used to leave a
+  // permanent hole with zero indication anything was wrong until a customer
+  // hit "No route found" on the live site. This check runs after every
+  // import and reports exactly which city pairs still aren't covered.
+  if (workbook.SheetNames.includes('Zone Matrix')) {
+    const allCities = await prisma.city.findMany({ select: { id: true, name: true } });
+    const [zoneCount, kmCount] = await Promise.all([
+      prisma.zoneMatrix.count(),
+      prisma.kmMatrix.count(),
+    ]);
+    const expectedPairs = allCities.length * allCities.length; // every city → every other city, INCLUDING same-city (local/intra-city delivery)
+    results.zoneMatrixCoverage = { configured: zoneCount, expected: expectedPairs, missing: Math.max(0, expectedPairs - zoneCount) };
+    results.kmMatrixCoverage = { configured: kmCount, expected: expectedPairs, missing: Math.max(0, expectedPairs - kmCount) };
+
+    if (results.zoneMatrixCoverage.missing > 0 || results.kmMatrixCoverage.missing > 0) {
+      results.errors.push(
+        `⚠ Zone Matrix is missing ${results.zoneMatrixCoverage.missing} of ${expectedPairs} city-pairs, ` +
+        `and Matrix by KM is missing ${results.kmMatrixCoverage.missing}. These pairs will show ` +
+        `"No route found" until filled — check the exported sheet for blank cells, or run ` +
+        `prisma/fill-missing-routes.js to auto-fill from the reverse direction where available.`
+      );
     }
   }
 

@@ -669,10 +669,6 @@ router.delete('/zone-matrix/:id', requireSuperAdmin, pricingController.deleteZon
  *                       type: integer
  *                       description: Active price bands
  *                       example: 16
- *                     totalPromoRate:
- *                       type: integer
- *                       description: Active admin promo rates
- *                       example: 3
  *                     totalBoxDimension:
  *                       type: integer
  *                       description: Box dimension types configured

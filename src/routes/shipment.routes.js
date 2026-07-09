@@ -4,7 +4,8 @@ const {
   authenticate,
   requireAdmin,
   requireLogisticsOrAbove,
-  requireSubRole,
+  requireShipmentOpsManagement,
+  requireEnterprise,
 } = require("../middleware/auth");
 const {
   downloadShippingLabel,
@@ -231,6 +232,24 @@ router.post("/", shipmentController.createShipment);
  */
 router.get("/my", shipmentController.listMyShipments);
 
+/**
+ * @swagger
+ * /shipments/enterprise:
+ *   get:
+ *     summary: List my company's shipments (Enterprise tenant)
+ *     tags: [Shipments]
+ *     description: >
+ *       Enterprise-only. Returns shipments scoped to the caller's own tenant
+ *       (ROLE_MASTER sees the whole company; other Enterprise roles see their
+ *       own + teammates'). Never returns other tenants' or platform-wide data.
+ *     responses:
+ *       200:
+ *         description: Tenant-scoped shipments returned
+ *       403:
+ *         description: Enterprise account required
+ */
+router.get("/enterprise", requireEnterprise, shipmentController.enterpriseListShipments);
+
 // ─── NAMED ROUTES — must all come BEFORE /:id ─────────────────────────────────
 // Express matches routes top-to-bottom. /:id would swallow /my, /admin/stats,
 // /:id/label, /:id/confirmation etc. if placed earlier.
@@ -276,6 +295,40 @@ router.get(
   "/admin/stats",
   requireLogisticsOrAbove,
   shipmentController.getShipmentStats,
+);
+
+/**
+ * @swagger
+ * /shipments/export/csv:
+ *   get:
+ *     summary: Export shipments as CSV (Admin) — Sprint 6 reporting
+ *     tags: [Shipments]
+ *     description: >
+ *       Downloads a CSV of shipments, respecting optional status and date
+ *       filters. PRD Sprint 6 DoD: "Admin can download a CSV report of all
+ *       Delivered shipments for the previous month."
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, example: DELIVERED }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: CSV file streamed as download
+ *       403:
+ *         description: Admin access required
+ */
+// NOTE: must be registered BEFORE the /:id routes or "export" would be
+// swallowed as a shipment id.
+router.get(
+  "/export/csv",
+  requireLogisticsOrAbove,
+  shipmentController.exportShipmentsCsv,
 );
 
 // ─── PDF DOCUMENT ROUTES (/:id/label and /:id/confirmation) ──────────────────
@@ -539,8 +592,48 @@ router.post("/:id/cancel", shipmentController.cancelShipment);
  */
 router.patch(
   "/:id/status",
-  requireSubRole("ROLE_DISPATCHER"), // PRD: only DISPATCHER can update status
+  requireShipmentOpsManagement, // Internal ops: platform-wide status updates across all shipments
   shipmentController.updateShipmentStatus,
+);
+
+/**
+ * @swagger
+ * /shipments/{id}/driver-location:
+ *   post:
+ *     summary: Update driver GPS location (Ops) — Sprint 4 proximity alerts
+ *     tags: [Shipments]
+ *     description: >
+ *       Called by the driver app roughly every 5 minutes. Appends a tracking
+ *       event, broadcasts the position via Socket.IO to the live tracking
+ *       page, and triggers the PRD 30-minute pickup proximity alert when the
+ *       driver is within 500 metres of the pickup address (sent once per
+ *       shipment).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [lat, lng]
+ *             properties:
+ *               lat: { type: number, example: 6.5244 }
+ *               lng: { type: number, example: 3.3792 }
+ *               location: { type: string, example: "Ikeja, Lagos" }
+ *     responses:
+ *       200: { description: Location recorded and broadcast }
+ *       400: { description: lat/lng missing }
+ *       403: { description: Shipment ops access required }
+ *       404: { description: Shipment not found }
+ */
+router.post(
+  "/:id/driver-location",
+  requireShipmentOpsManagement,
+  shipmentController.updateDriverLocation,
 );
 
 /**
@@ -597,8 +690,8 @@ router.patch(
  *       403:
  *         description: Admin access required
  */
-// ── PRD Sprint 8: Only MASTER / LOGISTICS_MANAGER / SUPER_ADMIN can assign
-// a dispatcher to a shipment. ROLE_DISPATCHER cannot self-assign.
+// Internal ops only: assigns a shipment to an internal staff member for handling.
+// This has nothing to do with the Enterprise tenant's own ROLE_DISPATCHER.
 // requireLogisticsOrAbove = SUPER_ADMIN | LOGISTICS_MANAGER | ROLE_ADMIN(canManageShipments)
 router.patch(
   "/:id/assign",
