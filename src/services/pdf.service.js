@@ -556,7 +556,7 @@ async function generateShippingLabelPDF(shipment) {
       .fillColor(BRAND.gray)
       .font("Helvetica")
       .fontSize(6)
-      .text("bowago.com  |  support@bowagate.com", 0, 408, {
+      .text("bowago.app  |  support@bowagate.app", 0, 408, {
         align: "center",
         width: 288,
       });
@@ -605,7 +605,7 @@ async function generateBookingConfirmationPDF(data) {
       .font("Helvetica")
       .fontSize(9)
       .text(
-        `Track at: ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace("https://", "").replace("http://", "") : "bowagate.com"}/track/${shipment.trackingNumber}`,
+        `Track at: ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace("https://", "").replace("http://", "") : "bowago.app"}/track/${shipment.trackingNumber}`,
         300,
         doc.y + 28,
       );
@@ -730,7 +730,7 @@ async function generateBookingConfirmationPDF(data) {
       .fontSize(9)
       .text("1.  Complete payment to confirm your booking.", 60, doc.y + 24)
       .text(
-        `2.  Package your items securely. Visit ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace(/^https?:\/\//, "") : "bowagate.com"}/packaging-guide for tips.`,
+        `2.  Package your items securely. Visit ${process.env.CLIENT_URL ? process.env.CLIENT_URL.replace(/^https?:\/\//, "") : "bowago.app"}/packaging-guide for tips.`,
         60,
         doc.y + 38,
       )

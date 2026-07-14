@@ -103,9 +103,15 @@ async function resendOtp(req, res) {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) throw new ApiError(404, "User not found");
 
-  await sendOtp(user.id, email, type || "EMAIL_VERIFY");
+  const otpResult = await sendOtp(user.id, email, type || "EMAIL_VERIFY");
 
-  return success(res, {}, "Verification code sent");
+  return success(
+    res,
+    { delivered: otpResult.delivered },
+    otpResult.delivered
+      ? "Verification code sent"
+      : "Code generated, but sending it failed. Please try again in a moment.",
+  );
 }
 
 // ─── LOGIN LOCKOUT HELPERS ────────────────────────────────────────────────────
@@ -181,23 +187,46 @@ async function login(req, res) {
   if (user.twoFactorEnabled) {
     let deliveryChannel = "EMAIL";
     if (user.twoFactorMethod === "SMS" && user.phone) {
-      try {
-        await sendOtp(user.id, user.phone, "TWO_FACTOR_LOGIN", "SMS");
+      const smsResult = await sendOtp(
+        user.id,
+        user.phone,
+        "TWO_FACTOR_LOGIN",
+        "SMS",
+      );
+      if (smsResult.delivered) {
         deliveryChannel = "SMS";
-      } catch (smsErr) {
-        // SMS failed — auto-fallback to email per PRD
-        try {
-          await sendOtp(user.id, email, "TWO_FACTOR_LOGIN", "EMAIL");
-          deliveryChannel = "EMAIL";
-        } catch (emailErr) {
+      } else {
+        // SMS failed — auto-fallback to email per PRD. sendOtp no longer
+        // throws on a delivery failure (see otp.service.js), so this has
+        // to check `.delivered` explicitly rather than relying on a catch
+        // block that will never fire anymore.
+        const emailResult = await sendOtp(
+          user.id,
+          email,
+          "TWO_FACTOR_LOGIN",
+          "EMAIL",
+        );
+        if (!emailResult.delivered) {
           throw new ApiError(
             503,
             "Unable to send verification code. Please try again later.",
           );
         }
+        deliveryChannel = "EMAIL";
       }
     } else {
-      await sendOtp(user.id, email, "TWO_FACTOR_LOGIN", "EMAIL");
+      const emailResult = await sendOtp(
+        user.id,
+        email,
+        "TWO_FACTOR_LOGIN",
+        "EMAIL",
+      );
+      if (!emailResult.delivered) {
+        throw new ApiError(
+          503,
+          "Unable to send verification code. Please try again later.",
+        );
+      }
     }
     return success(
       res,
@@ -275,41 +304,63 @@ async function setup2FA(req, res) {
         "Add a phone number to your profile before enabling SMS 2FA.",
       );
     }
-    try {
-      await sendOtp(user.id, user.phone, "TWO_FACTOR_SETUP", "SMS");
+    const smsResult = await sendOtp(
+      user.id,
+      user.phone,
+      "TWO_FACTOR_SETUP",
+      "SMS",
+    );
+    if (smsResult.delivered) {
       return success(
         res,
         { method: "SMS", deliveryChannel: "SMS", alreadyEnabled },
         `Verification code sent to ${maskPhone(user.phone)}. Enter it to ${alreadyEnabled ? "verify your session" : "confirm 2FA setup"}.`,
       );
-    } catch (smsErr) {
-      // SMS failed — auto-fallback to email per PRD Sprint 2
-      try {
-        await sendOtp(user.id, user.email, "TWO_FACTOR_SETUP", "EMAIL");
-        return success(
-          res,
-          {
-            method: "SMS",
-            deliveryChannel: "EMAIL",
-            smsFallback: true,
-            alreadyEnabled,
-          },
-          "SMS unavailable — verification code sent to your email instead. Enter it to confirm 2FA setup.",
-        );
-      } catch (emailErr) {
-        throw new ApiError(
-          503,
-          "Unable to send verification code. Please try again later.",
-        );
-      }
     }
+    // SMS failed — auto-fallback to email per PRD Sprint 2. sendOtp no
+    // longer throws on delivery failure, so this checks `.delivered`
+    // explicitly instead of relying on a catch block that won't fire.
+    const emailResult = await sendOtp(
+      user.id,
+      user.email,
+      "TWO_FACTOR_SETUP",
+      "EMAIL",
+    );
+    if (!emailResult.delivered) {
+      throw new ApiError(
+        503,
+        "Unable to send verification code. Please try again later.",
+      );
+    }
+    return success(
+      res,
+      {
+        method: "SMS",
+        deliveryChannel: "EMAIL",
+        smsFallback: true,
+        alreadyEnabled,
+      },
+      "SMS unavailable — verification code sent to your email instead. Enter it to confirm 2FA setup.",
+    );
   }
 
-  await sendOtp(user.id, user.email, "TWO_FACTOR_SETUP", "EMAIL");
+  const setupEmailResult = await sendOtp(
+    user.id,
+    user.email,
+    "TWO_FACTOR_SETUP",
+    "EMAIL",
+  );
   return success(
     res,
-    { method: "EMAIL", deliveryChannel: "EMAIL", alreadyEnabled },
-    `Verification code sent to your email. Enter it to ${alreadyEnabled ? "verify your session" : "confirm 2FA setup"}.`,
+    {
+      method: "EMAIL",
+      deliveryChannel: "EMAIL",
+      alreadyEnabled,
+      delivered: setupEmailResult.delivered,
+    },
+    setupEmailResult.delivered
+      ? `Verification code sent to your email. Enter it to ${alreadyEnabled ? "verify your session" : "confirm 2FA setup"}.`
+      : "Code generated, but sending it failed. Please try again in a moment.",
   );
 }
 
@@ -435,11 +486,17 @@ async function googleAuth(req, res) {
   if (user.twoFactorEnabled) {
     let deliveryChannel = "EMAIL";
     if (user.twoFactorMethod === "SMS" && user.phone) {
-      try {
-        await sendOtp(user.id, user.phone, "TWO_FACTOR_LOGIN", "SMS");
+      const smsResult = await sendOtp(
+        user.id,
+        user.phone,
+        "TWO_FACTOR_LOGIN",
+        "SMS",
+      );
+      if (smsResult.delivered) {
         deliveryChannel = "SMS";
-      } catch {
-        // SMS failed — fall back to email
+      } else {
+        // SMS failed — fall back to email. sendOtp no longer throws on a
+        // delivery failure, so this checks `.delivered` explicitly.
         await sendOtp(user.id, user.email, "TWO_FACTOR_LOGIN", "EMAIL");
         deliveryChannel = "EMAIL";
       }

@@ -1,8 +1,3 @@
-// MUST be the first require — patches Express to forward errors thrown
-// or rejected inside async route handlers to errorHandler (Express 4 does
-// not do this natively). Without this, an unhandled rejection in any
-// `async (req, res) => {...}` handler can bypass our sanitized error
-// handler and surface raw driver/Prisma error text to the client.
 require("express-async-errors");
 
 const express = require("express");
@@ -109,23 +104,19 @@ app.use(
 // ─── Raw body for QStash cron callbacks — MUST come before express.json() ───
 // QStash signs the exact raw request body, so we need it untouched by
 // express.json() to verify the Upstash-Signature header.
-app.use(
-  "/api/v1/cron",
-  express.raw({ type: "*/*" }),
-  (req, res, next) => {
-    if (Buffer.isBuffer(req.body)) {
-      req.rawBody = req.body.toString() || "";
-      try {
-        req.body = req.body.length ? JSON.parse(req.body.toString()) : {};
-      } catch {
-        req.body = {};
-      }
-    } else {
-      req.rawBody = "";
+app.use("/api/v1/cron", express.raw({ type: "*/*" }), (req, res, next) => {
+  if (Buffer.isBuffer(req.body)) {
+    req.rawBody = req.body.toString() || "";
+    try {
+      req.body = req.body.length ? JSON.parse(req.body.toString()) : {};
+    } catch {
+      req.body = {};
     }
-    next();
-  },
-);
+  } else {
+    req.rawBody = "";
+  }
+  next();
+});
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -277,7 +268,7 @@ app.get("/health", async (req, res) => {
       cloudinary: !!process.env.CLOUDINARY_CLOUD_NAME
         ? "configured"
         : "missing",
-      email: !!process.env.SMTP_USER ? "configured" : "missing",
+      email: !!process.env.RESEND_API_KEY ? "configured" : "missing",
       jwt: !!process.env.JWT_SECRET ? "configured" : "missing",
       clientUrl: rawOrigins.length > 0 ? rawOrigins.join(", ") : "open (*)",
     },

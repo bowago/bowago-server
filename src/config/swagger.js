@@ -31,8 +31,8 @@ All monetary values are stored in **Kobo** internally. API responses include com
       `,
       contact: {
         name: "BowaGO Support",
-        email: "support@bowago.com",
-        url: "https://bowago.com",
+        email: "support@bowago.app",
+        url: "https://bowago.app",
       },
       license: {
         name: "Proprietary",

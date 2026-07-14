@@ -1,3 +1,13 @@
+/**
+ * Enterprise Team Invite — Sprint 8
+ * PRD: ROLE_MASTER invites team members into their Enterprise tenant; invite
+ * expires 7 days. Invited users are created with role = ENTERPRISE and an
+ * enterpriseRole — they are NEVER given role = ADMIN. This endpoint has
+ * nothing to do with Internal BowaGo Administration (see adminRole.controller.js
+ * for that).
+ * Roles available: ROLE_MASTER, ROLE_AGENT, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_USER.
+ */
+
 const crypto = require("crypto");
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
@@ -87,15 +97,9 @@ async function inviteMember(req, res) {
     },
   });
 
-  // Build invite URL
-  const baseUrl = process.env.FRONTEND_URL || "https://app.bowago.com";
+  const baseUrl = process.env.FRONTEND_URL || "https://bowago.app";
   const inviteUrl = `${baseUrl}/auth/accept-invite?token=${token}`;
 
-  // Send invite email. sendInviteEmail uses the shared SMTP transporter from
-  // config/email.js. Awaited (rather than fire-and-forget) so the response
-  // — and the persisted emailSent/emailError fields — reflect what actually
-  // happened, instead of always claiming success while a real SMTP failure
-  // only ever showed up in a server console log nobody was watching.
   let emailSent = true;
   let emailError = null;
   try {
@@ -324,7 +328,7 @@ async function resendInvite(req, res) {
     data: { token, expiresAt, status: "PENDING" },
   });
 
-  const baseUrl = process.env.FRONTEND_URL || "https://app.bowago.com";
+  const baseUrl = process.env.FRONTEND_URL || "https://bowago.app";
   const inviteUrl = `${baseUrl}/auth/accept-invite?token=${token}`;
 
   let emailSent = true;

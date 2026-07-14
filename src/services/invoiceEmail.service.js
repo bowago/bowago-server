@@ -1,17 +1,4 @@
-/**
- * BowaGO Invoice & Booking Email Service
- *
- * Uses the shared emailShell from config/email.js for a consistent branded
- * design across all transactional emails.
- *
- * SVG logos:
- *   - Header (red bg): bowago-logo.svg  (white text variant — served from FRONTEND_URL)
- *   - Dark amount box: plain text kept in CSS
- */
-
-const { emailShell, FRONTEND, transporter } = require("../config/email");
-
-const FROM = process.env.EMAIL_FROM || "BowaGO <noreply@bowago.ng>";
+const { emailShell, FRONTEND, sendEmail } = require("../config/email");
 
 function formatNaira(koboOrNaira) {
   const naira = Number(koboOrNaira || 0);
@@ -82,8 +69,7 @@ async function sendInvoiceEmail({
     },
   );
 
-  await transporter.sendMail({
-    from: FROM,
+  await sendEmail({
     to,
     subject: `BowaGO Invoice INV-${invoiceNumber}`,
     html,
@@ -91,7 +77,6 @@ async function sendInvoiceEmail({
       {
         filename: `BowaGO-Invoice-${invoiceNumber}.pdf`,
         content: pdfBuffer,
-        contentType: "application/pdf",
       },
     ],
   });
@@ -169,8 +154,7 @@ async function sendBookingConfirmationEmail({
     });
   }
 
-  await transporter.sendMail({
-    from: FROM,
+  await sendEmail({
     to,
     subject: `BowaGO Booking Confirmed — ${trackingNumber}`,
     html,
@@ -213,8 +197,7 @@ async function sendPaymentSuccessEmail({
     },
   );
 
-  await transporter.sendMail({
-    from: FROM,
+  await sendEmail({
     to,
     subject: `Payment Confirmed — ${formatNaira(amount)} received`,
     html,
