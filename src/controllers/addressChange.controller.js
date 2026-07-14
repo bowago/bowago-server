@@ -8,6 +8,7 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 const { sendEmail } = require("../config/email");
+const { notify } = require("../services/notify.service");
 
 // ─── Customer: Request address change ────────────────────────────────────────
 async function requestAddressChange(req, res) {
@@ -75,7 +76,7 @@ async function requestAddressChange(req, res) {
   });
 
   // Notify admins
-  await prisma.notification.create({
+  const submittedNotification = await prisma.notification.create({
     data: {
       userId: req.user.id,
       type: "SHIPMENT_UPDATE",
@@ -84,6 +85,7 @@ async function requestAddressChange(req, res) {
       data: { shipmentId, changeRequestId: changeReq.id },
     },
   });
+  notify(req.user.id, submittedNotification);
 
   return created(
     res,
@@ -123,6 +125,12 @@ async function listAddressChangeRequests(req, res) {
             trackingNumber: true,
             senderCity: true,
             recipientCity: true,
+            // Full current address — previously only recipientCity was
+            // selected, so the admin approval screen could only compare
+            // "current city" against the requested new full address, not a
+            // true apples-to-apples old-vs-new comparison.
+            recipientAddress: true,
+            recipientState: true,
             status: true,
           },
         },
@@ -201,7 +209,7 @@ async function reviewAddressChange(req, res) {
   }
 
   // Notify customer
-  await prisma.notification.create({
+  const reviewNotification = await prisma.notification.create({
     data: {
       userId: changeReq.userId,
       type: "SHIPMENT_UPDATE",
@@ -216,6 +224,7 @@ async function reviewAddressChange(req, res) {
       data: { shipmentId: changeReq.shipmentId },
     },
   });
+  notify(changeReq.userId, reviewNotification);
 
   return success(res, {}, `Request ${newStatus.toLowerCase()}`);
 }

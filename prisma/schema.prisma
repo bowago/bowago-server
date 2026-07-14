@@ -213,6 +213,7 @@ model User {
   otpCodes            OtpCode[]
   refreshTokens       RefreshToken[]
   notifications       Notification[]
+  pushSubscriptions   PushSubscription[]
   activityLogs        ActivityLog[]
   payments            Payment[]
   addressChangeReqs   AddressChangeRequest[]
@@ -818,6 +819,21 @@ model Notification {
   @@map("notifications")
 }
 
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@map("push_subscriptions")
+}
+
 // ─── SYSTEM ───────────────────────────────────────────────────────────────────
 
 model ActivityLog {
@@ -997,6 +1013,7 @@ model Quote {
   remoteAreaFeeKobo     Int         @default(0)
   vatKobo               Int         @default(0)
   totalPriceKobo        Int
+  surchargeBreakdown    Json?
   // Insurance
   insuranceSelected     Boolean     @default(false)
   declaredValueKobo     Int?
@@ -1083,6 +1100,9 @@ model OrgInvite {
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  emailSent   Boolean   @default(false)
+  emailError  String?
 
   @@index([email])
   @@index([status])

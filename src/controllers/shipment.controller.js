@@ -1,8 +1,12 @@
 const { prisma } = require("../config/db");
 const { checkProximityAndNotify } = require("../services/proximity.service");
-const { calculateShippingCost } = require("../services/pricing.service");
+const {
+  calculateShippingCost,
+  getDeliveryEstimate,
+} = require("../services/pricing.service");
 const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
+const { notify } = require("../services/notify.service");
 const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { ApiError } = require("../utils/ApiError");
 const { assertOwnedResourceAccess } = require("../utils/access");
@@ -172,7 +176,81 @@ async function createShipment(req, res) {
       weightKg: lockedQuote.billableWeightKg ?? lockedQuote.weightKg,
       fromCity: fromCityRec,
       toCity: toCityRec,
+      // Carried over from the locked quote so the booking-confirmation
+      // review and later "view shipment" screens can actually show that a
+      // contract rate or promo code was applied — this used to get dropped
+      // here, which made contract/promo pricing invisible even though the
+      // discount was correctly baked into quotedPrice all along.
+      pricingMode: lockedQuote.pricingMode,
+      appliedDiscount:
+        lockedQuote.pricingMode && lockedQuote.pricingMode !== "STANDARD"
+          ? {
+              type: lockedQuote.pricingMode,
+              label:
+                lockedQuote.pricingMode === "PROMO"
+                  ? `Promo Code "${(lockedQuote.promoCode || "").toUpperCase()}"`
+                  : "Enterprise Contract Rate",
+              // Despite the field name, promoDiscountKobo holds the discount
+              // amount for CONTRACT mode too — see quote.controller.js.
+              discountAmount: (lockedQuote.promoDiscountKobo || 0) / 100,
+            }
+          : null,
+      // Prefer the full itemized breakdown stored on the quote (captures any
+      // custom/ad-hoc surcharge type exactly as computed). Older quotes
+      // generated before this field existed will have it null/empty, so we
+      // fall back to reconstructing from the three built-in kobo columns —
+      // that fallback can't recover a custom surcharge, but it's still
+      // correct for the standard fuel/remote-area/VAT case.
+      total: lockedQuote.totalPriceKobo / 100,
+      totalSurcharge:
+        Array.isArray(lockedQuote.surchargeBreakdown) &&
+        lockedQuote.surchargeBreakdown.length > 0
+          ? lockedQuote.surchargeBreakdown.reduce(
+              (sum, item) => sum + (item.amount || 0),
+              0,
+            ) +
+            (lockedQuote.insurancePremiumKobo || 0) / 100
+          : (lockedQuote.fuelSurchargeKobo +
+              lockedQuote.remoteAreaFeeKobo +
+              lockedQuote.vatKobo +
+              (lockedQuote.insurancePremiumKobo || 0)) /
+            100,
+      surchargeBreakdown:
+        Array.isArray(lockedQuote.surchargeBreakdown) &&
+        lockedQuote.surchargeBreakdown.length > 0
+          ? lockedQuote.surchargeBreakdown
+          : [
+              lockedQuote.fuelSurchargeKobo > 0 && {
+                type: "FUEL",
+                label: "Fuel Surcharge",
+                amount: lockedQuote.fuelSurchargeKobo / 100,
+              },
+              lockedQuote.remoteAreaFeeKobo > 0 && {
+                type: "REMOTE_AREA",
+                label: "Remote Area Fee",
+                amount: lockedQuote.remoteAreaFeeKobo / 100,
+              },
+              lockedQuote.vatKobo > 0 && {
+                type: "VAT",
+                label: "VAT (7.5%)",
+                amount: lockedQuote.vatKobo / 100,
+              },
+            ].filter(Boolean),
     };
+
+    // Real zone+service-aware delivery estimate — previously the frontend
+    // always showed a static "1-3 days" for Express etc. regardless of
+    // route, so an intra-city shipment looked identical to a cross-country
+    // one. See pricing.service.js#getDeliveryEstimate.
+    quote.deliveryEstimate = await getDeliveryEstimate(
+      lockedQuote.zone,
+      lockedQuote.serviceType,
+      {
+        isSameCity:
+          !!lockedQuote.originCityId &&
+          lockedQuote.originCityId === lockedQuote.destinationCityId,
+      },
+    );
 
     quotedPrice = lockedQuote.totalPriceKobo / 100;
     resolvedServiceType = lockedQuote.serviceType;
@@ -254,6 +332,10 @@ async function createShipment(req, res) {
     quote.zone,
     resolvedServiceType,
     resolvedPickupDate,
+    {
+      isSameCity:
+        !!quote.fromCity?.id && quote.fromCity.id === quote.toCity?.id,
+    },
   );
   console.log(
     "[createShipment] SLA estimated delivery:",
@@ -337,7 +419,10 @@ async function createShipment(req, res) {
       shipment.id,
       appliedPromoDiscountNaira,
     ).catch((err) =>
-      console.error("[createShipment] recordPromoRedemption failed:", err.message),
+      console.error(
+        "[createShipment] recordPromoRedemption failed:",
+        err.message,
+      ),
     );
   }
 
@@ -378,14 +463,26 @@ async function listMyShipments(req, res) {
       orderBy: { createdAt: "desc" },
       include: {
         trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
+        // Only need to know IF one's pending, not the full request — this
+        // powers the "Address Change Pending" badge on the shipment list.
+        addressChangeReqs: {
+          where: { status: "PENDING" },
+          select: { id: true },
+          take: 1,
+        },
       },
     }),
     prisma.shipment.count({ where }),
   ]);
 
+  const shipmentsWithFlags = shipments.map(({ addressChangeReqs, ...s }) => ({
+    ...s,
+    hasPendingAddressChange: addressChangeReqs.length > 0,
+  }));
+
   return res.json({
     success: true,
-    data: { shipments },
+    data: { shipments: shipmentsWithFlags },
     meta: buildMeta(total, page, limit),
   });
 }
@@ -409,6 +506,8 @@ async function getShipment(req, res) {
           email: true,
           phone: true,
           avatar: true,
+          role: true,
+          masterId: true,
         },
       },
       assignedTo: {
@@ -418,6 +517,26 @@ async function getShipment(req, res) {
       toCity: { select: { id: true, name: true, region: true, state: true } },
       trackingHistory: { orderBy: { createdAt: "asc" } },
       documents: true,
+      // Pricing mode (STANDARD/CONTRACT/PROMO) and discount info were computed
+      // at quote time and live on the linked Quote row — the Shipment table
+      // itself only stores the final quotedPrice with no breakdown of *why*
+      // it's that price. Without this, contract-rate and promo discounts are
+      // invisible after booking even though they were correctly applied.
+      quote: {
+        select: {
+          pricingMode: true,
+          promoCode: true,
+          // Despite the name, this holds the discount amount for BOTH promo
+          // AND contract-rate pricing — see quote.controller.js, it's set
+          // from appliedDiscount.discountAmount regardless of mode.
+          promoDiscountKobo: true,
+          basePriceKobo: true,
+          zone: true,
+          serviceType: true,
+          originCityId: true,
+          destinationCityId: true,
+        },
+      },
     },
   });
 
@@ -432,7 +551,38 @@ async function getShipment(req, res) {
     req,
   });
 
-  return success(res, { shipment });
+  const { quote: linkedQuote, ...shipmentFields } = shipment;
+
+  // Real zone+service-aware delivery estimate for the "view shipment"
+  // screens — same reasoning as the createShipment path above.
+  const deliveryEstimate = linkedQuote
+    ? await getDeliveryEstimate(linkedQuote.zone, linkedQuote.serviceType, {
+        isSameCity:
+          !!linkedQuote.originCityId &&
+          linkedQuote.originCityId === linkedQuote.destinationCityId,
+      })
+    : null;
+
+  return success(res, {
+    shipment: shipmentFields,
+    quote: linkedQuote
+      ? {
+          pricingMode: linkedQuote.pricingMode,
+          appliedDiscount:
+            linkedQuote.pricingMode && linkedQuote.pricingMode !== "STANDARD"
+              ? {
+                  type: linkedQuote.pricingMode,
+                  label:
+                    linkedQuote.pricingMode === "PROMO"
+                      ? `Promo Code "${(linkedQuote.promoCode || "").toUpperCase()}"`
+                      : "Enterprise Contract Rate",
+                  discountAmount: (linkedQuote.promoDiscountKobo || 0) / 100,
+                }
+              : null,
+          deliveryEstimate,
+        }
+      : null,
+  });
 }
 
 // ─── PUBLIC TRACKING (no auth) ────────────────────────────────────────────────
@@ -446,42 +596,43 @@ async function trackShipment(req, res) {
   let shipment = await getCachedTracking(trackingNumber);
   let cameFromCache = !!shipment;
 
-  if (!shipment) shipment = await prisma.shipment.findUnique({
-    where: { trackingNumber },
-    select: {
-      trackingNumber: true,
-      status: true,
-      serviceType: true,
-      senderName: true,
-      senderCity: true,
-      senderState: true,
-      senderAddress: true,
-      recipientName: true,
-      recipientCity: true,
-      recipientState: true,
-      recipientAddress: true,
-      customerId: true,
-      pickupDate: true,
-      estimatedDelivery: true,
-      deliveredAt: true,
-      quotedPrice: true,
-      weight: true,
-      weightUnit: true,
-      cartons: true,
-      trackingHistory: {
-        orderBy: { createdAt: "asc" },
-        select: {
-          status: true,
-          location: true,
-          description: true,
-          createdAt: true,
-          proofUrl: true,
-          lat: true,
-          lng: true,
+  if (!shipment)
+    shipment = await prisma.shipment.findUnique({
+      where: { trackingNumber },
+      select: {
+        trackingNumber: true,
+        status: true,
+        serviceType: true,
+        senderName: true,
+        senderCity: true,
+        senderState: true,
+        senderAddress: true,
+        recipientName: true,
+        recipientCity: true,
+        recipientState: true,
+        recipientAddress: true,
+        customerId: true,
+        pickupDate: true,
+        estimatedDelivery: true,
+        deliveredAt: true,
+        quotedPrice: true,
+        weight: true,
+        weightUnit: true,
+        cartons: true,
+        trackingHistory: {
+          orderBy: { createdAt: "asc" },
+          select: {
+            status: true,
+            location: true,
+            description: true,
+            createdAt: true,
+            proofUrl: true,
+            lat: true,
+            lng: true,
+          },
         },
       },
-    },
-  });
+    });
 
   if (!shipment) throw new ApiError(404, "Tracking number not found");
 
@@ -531,15 +682,43 @@ async function trackShipment(req, res) {
 // back into the pre-pickup flow via its own approval controllers, but admins
 // can also resolve it here.
 const VALID_STATUS_TRANSITIONS = {
-  PENDING: ["BOOKED", "AWAITING_PICKUP", "CONFIRMED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  PENDING: [
+    "BOOKED",
+    "AWAITING_PICKUP",
+    "CONFIRMED",
+    "CANCELLED",
+    "PENDING_ADMIN_REVIEW",
+  ],
   BOOKED: ["AWAITING_PICKUP", "CONFIRMED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
-  AWAITING_PICKUP: ["CONFIRMED", "PICKED_UP", "CANCELLED", "PENDING_ADMIN_REVIEW"],
-  CONFIRMED: ["AWAITING_PICKUP", "PICKED_UP", "CANCELLED", "PENDING_ADMIN_REVIEW"],
+  AWAITING_PICKUP: [
+    "CONFIRMED",
+    "PICKED_UP",
+    "CANCELLED",
+    "PENDING_ADMIN_REVIEW",
+  ],
+  CONFIRMED: [
+    "AWAITING_PICKUP",
+    "PICKED_UP",
+    "CANCELLED",
+    "PENDING_ADMIN_REVIEW",
+  ],
   PICKED_UP: ["IN_TRANSIT", "FAILED", "CANCELLED", "PENDING_ADMIN_REVIEW"],
-  IN_TRANSIT: ["OUT_FOR_DELIVERY", "DELIVERED", "FAILED", "RETURNED", "PENDING_ADMIN_REVIEW"],
+  IN_TRANSIT: [
+    "OUT_FOR_DELIVERY",
+    "DELIVERED",
+    "FAILED",
+    "RETURNED",
+    "PENDING_ADMIN_REVIEW",
+  ],
   OUT_FOR_DELIVERY: ["DELIVERED", "FAILED", "RETURNED"],
   FAILED: ["OUT_FOR_DELIVERY", "RETURNED", "CANCELLED"],
-  PENDING_ADMIN_REVIEW: ["AWAITING_PICKUP", "CONFIRMED", "PICKED_UP", "IN_TRANSIT", "CANCELLED"],
+  PENDING_ADMIN_REVIEW: [
+    "AWAITING_PICKUP",
+    "CONFIRMED",
+    "PICKED_UP",
+    "IN_TRANSIT",
+    "CANCELLED",
+  ],
   DELIVERED: [], // terminal
   CANCELLED: [], // terminal
   RETURNED: [], // terminal
@@ -560,9 +739,39 @@ async function updateShipmentStatus(req, res) {
 
   const shipment = await prisma.shipment.findUnique({
     where: { id },
-    include: { customer: { select: { email: true, firstName: true } } },
+    include: {
+      customer: {
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          role: true,
+          masterId: true,
+        },
+      },
+    },
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  // ── Enterprise dispatch scoping ──────────────────────────────────────────
+  // requireShipmentDispatchAccess only confirmed the caller is EITHER
+  // internal ops staff OR *some* company's ROLE_MASTER/ROLE_DISPATCHER — it
+  // can't check which company's shipment this is without loading it, so
+  // that happens here. Internal ADMIN staff (including SUPER_ADMIN) are
+  // platform-wide and skip this entirely; an ENTERPRISE caller may only
+  // touch shipments whose customer belongs to their own company, found by
+  // comparing "company root" (a user's masterId if they're staff, or their
+  // own id if they're the master themselves).
+  if (req.user.role === "ENTERPRISE") {
+    const callerRoot = req.user.masterId || req.user.id;
+    const targetRoot = shipment.customer?.masterId || shipment.customer?.id;
+    if (!targetRoot || callerRoot !== targetRoot) {
+      throw new ApiError(
+        403,
+        "You can only update shipments belonging to your own company.",
+      );
+    }
+  }
 
   // ── PRD: block invalid state transitions ─────────────────────────────────
   // Same-status updates are allowed (used for location pings that append a
@@ -643,23 +852,31 @@ async function updateShipmentStatus(req, res) {
     take: 20,
   });
   socketService.emitShipmentUpdate(updated, timeline);
-  socketService.emitNotification(shipment.customerId, notification);
+  notify(shipment.customerId, notification);
 
   // ── On DELIVERED: auto-generate invoice + earn loyalty points ─────────────
   if (status === "DELIVERED") {
     // Auto-invoice (non-blocking — failure must not affect the status update response)
     autoGenerateInvoice(updated).catch((err) =>
-      console.error("[AutoInvoice] Failed for shipment", updated.trackingNumber, err.message),
+      console.error(
+        "[AutoInvoice] Failed for shipment",
+        updated.trackingNumber,
+        err.message,
+      ),
     );
 
     // Loyalty points earn
     const finalPrice = updated.finalPrice ?? updated.quotedPrice;
     earnPoints({
-      userId:           shipment.customerId,
-      shipmentId:       id,
-      finalPriceNaira:  finalPrice,
+      userId: shipment.customerId,
+      shipmentId: id,
+      finalPriceNaira: finalPrice,
     }).catch((err) =>
-      console.error("[Loyalty] Earn failed for shipment", updated.trackingNumber, err.message),
+      console.error(
+        "[Loyalty] Earn failed for shipment",
+        updated.trackingNumber,
+        err.message,
+      ),
     );
   }
 
@@ -940,7 +1157,22 @@ const SHIPMENT_LIST_INCLUDE = {
   fromCity: { select: { id: true, name: true, state: true } },
   toCity: { select: { id: true, name: true, state: true } },
   trackingHistory: { orderBy: { createdAt: "desc" }, take: 1 },
+  addressChangeReqs: {
+    where: { status: "PENDING" },
+    select: { id: true },
+    take: 1,
+  },
 };
+
+// Strips the raw addressChangeReqs array down to a simple boolean the
+// shipment-list table can badge — shared by admin/enterprise list responses.
+function withAddressChangeFlag(shipment) {
+  const { addressChangeReqs, ...rest } = shipment;
+  return {
+    ...rest,
+    hasPendingAddressChange: (addressChangeReqs ?? []).length > 0,
+  };
+}
 
 // ─── INTERNAL ADMIN: LIST ALL SHIPMENTS (platform-wide, unscoped) ────────────
 // role = ADMIN only (SUPER_ADMIN / LOGISTICS_MANAGER / ROLE_ADMIN with
@@ -963,7 +1195,7 @@ async function adminListShipments(req, res) {
 
   return res.json({
     success: true,
-    data: { shipments },
+    data: { shipments: shipments.map(withAddressChangeFlag) },
     meta: buildMeta(total, page, limit),
   });
 }
@@ -981,7 +1213,8 @@ async function enterpriseListShipments(req, res) {
 
   // For ROLE_MASTER: masterId is the master themselves.
   // For team members: masterId stored on their user record points to the master.
-  const masterId = enterpriseRole === "ROLE_MASTER" ? req.user.id : req.user.masterId;
+  const masterId =
+    enterpriseRole === "ROLE_MASTER" ? req.user.id : req.user.masterId;
 
   let orgFilter;
   if (masterId) {
@@ -1015,7 +1248,7 @@ async function enterpriseListShipments(req, res) {
 
   return res.json({
     success: true,
-    data: { shipments },
+    data: { shipments: shipments.map(withAddressChangeFlag) },
     meta: buildMeta(total, page, limit),
   });
 }

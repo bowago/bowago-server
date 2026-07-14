@@ -1,7 +1,12 @@
 // ─── admin.routes.js ──────────────────────────────────────────────────────────
-const adminRouter = require('express').Router();
-const adminController = require('../controllers/admin.controller');
-const { authenticate, requireAdmin, requireSuperAdmin, requireAuditLogAccess } = require('../middleware/auth');
+const adminRouter = require("express").Router();
+const adminController = require("../controllers/admin.controller");
+const {
+  authenticate,
+  requireAdmin,
+  requireSuperAdmin,
+  requireAuditLogAccess,
+} = require("../middleware/auth");
 
 /**
  * @swagger
@@ -58,7 +63,7 @@ adminRouter.use(authenticate, requireAdmin);
  *       403:
  *         description: Admin access required
  */
-adminRouter.get('/dashboard', adminController.getDashboardStats);
+adminRouter.get("/dashboard", adminController.getDashboardStats);
 
 /**
  * @swagger
@@ -93,7 +98,7 @@ adminRouter.get('/dashboard', adminController.getDashboardStats);
  *       403:
  *         description: Admin access required
  */
-adminRouter.get('/settings', adminController.getSettings);
+adminRouter.get("/settings", adminController.getSettings);
 
 /**
  * @swagger
@@ -129,7 +134,7 @@ adminRouter.get('/settings', adminController.getSettings);
  *       403:
  *         description: Super admin access required
  */
-adminRouter.post('/settings', requireSuperAdmin, adminController.updateSetting);
+adminRouter.post("/settings", requireSuperAdmin, adminController.updateSetting);
 
 /**
  * @swagger
@@ -175,6 +180,10 @@ adminRouter.post('/settings', requireSuperAdmin, adminController.updateSetting);
  *       403:
  *         description: Admin access required
  */
-adminRouter.get('/activity-logs', adminController.getActivityLogs);
+adminRouter.get(
+  "/activity-logs",
+  requireAuditLogAccess,
+  adminController.getActivityLogs,
+);
 
 module.exports = adminRouter;

@@ -1,5 +1,6 @@
 const { prisma } = require("../config/db");
 const socketService = require("../services/socket.service");
+const { notify } = require("../services/notify.service");
 const { ApiError } = require("../utils/ApiError");
 const { assertOwnedResourceAccess } = require("../utils/access");
 const {
@@ -9,11 +10,6 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 
-// Auto-assign logic based on category (Sprint 6)
-// Internal CS agents are role = ADMIN, adminSubRole = ROLE_ADMIN with a
-// capability flag — NOT Enterprise roles. (Enterprise ROLE_AGENT/ROLE_FINANCE/
-// ROLE_DISPATCHER belong to tenants and never handle BowaGo's own support queue.)
-// PRD: PAYMENT/PRICING → finance-capable agent, TRACKING/DELIVERY → shipment-ops-capable agent, others → ticket agent
 async function autoAssignTicket(category) {
   const categoryCapabilityMap = {
     PAYMENT: "canManageInvoices",
@@ -25,7 +21,8 @@ async function autoAssignTicket(category) {
     OTHER: "canManageTickets",
   };
 
-  const requiredCapability = categoryCapabilityMap[category] || "canManageTickets";
+  const requiredCapability =
+    categoryCapabilityMap[category] || "canManageTickets";
 
   const agent = await prisma.user.findFirst({
     where: {
@@ -100,7 +97,7 @@ async function createTicket(req, res) {
 
   // Notify assigned agent
   if (assignedToId) {
-    await prisma.notification.create({
+    const assignNotification = await prisma.notification.create({
       data: {
         userId: assignedToId,
         type: "SYSTEM",
@@ -109,6 +106,7 @@ async function createTicket(req, res) {
         data: { ticketId: ticket.id },
       },
     });
+    notify(assignedToId, assignNotification);
   }
 
   return created(res, { ticket }, "Support ticket created");
@@ -266,7 +264,7 @@ async function replyToTicket(req, res) {
   const notifyUserId =
     req.user.role === "ADMIN" ? ticket.customerId : ticket.assignedToId;
   if (notifyUserId && !isInternal) {
-    await prisma.notification.create({
+    const replyNotification = await prisma.notification.create({
       data: {
         userId: notifyUserId,
         type: "SYSTEM",
@@ -275,6 +273,7 @@ async function replyToTicket(req, res) {
         data: { ticketId: id },
       },
     });
+    notify(notifyUserId, replyNotification);
   }
 
   // Sprint 6: Real-time — push new message to everyone in the ticket room
@@ -344,11 +343,29 @@ async function updateTicket(req, res) {
   const { id } = req.params;
   const { status, assignedToId, priority } = req.body;
 
+  const existing = await prisma.supportTicket.findUnique({
+    where: { id },
+    select: { assignedToId: true },
+  });
+  if (!existing) throw new ApiError(404, "Ticket not found");
+
+  // If an admin resolves/updates a ticket that was never explicitly
+  // assigned to anyone, auto-assign it to them. Without this, the ticket's
+  // assignedToId stays null forever, and getAgentKpi's aggregation query
+  // only counts tickets with assignedToId set — so a resolved-but-unassigned
+  // ticket silently never appears in ANY agent's KPI stats, which looks
+  // exactly like "the dashboard isn't updating" even though the underlying
+  // resolution was recorded correctly.
+  const effectiveAssignedToId =
+    assignedToId ||
+    existing.assignedToId ||
+    (req.user.role === "ADMIN" ? req.user.id : undefined);
+
   const ticket = await prisma.supportTicket.update({
     where: { id },
     data: {
       ...(status && { status }),
-      ...(assignedToId && { assignedToId }),
+      ...(effectiveAssignedToId && { assignedToId: effectiveAssignedToId }),
       ...(priority && { priority }),
       ...(status === "RESOLVED" && { resolvedAt: new Date() }),
       ...(status === "CLOSED" && { closedAt: new Date() }),
@@ -359,7 +376,7 @@ async function updateTicket(req, res) {
   });
 
   if (status === "RESOLVED") {
-    await prisma.notification.create({
+    const resolvedNotification = await prisma.notification.create({
       data: {
         userId: ticket.customerId,
         type: "SYSTEM",
@@ -368,6 +385,7 @@ async function updateTicket(req, res) {
         data: { ticketId: id },
       },
     });
+    notify(ticket.customerId, resolvedNotification);
   }
 
   // Sprint 6: Real-time — notify ticket room of status/assignment changes
@@ -427,14 +445,18 @@ async function getAgentKpi(req, res) {
   const toDate = to ? new Date(to) : new Date();
 
   // Determine whether this internal staff member can see everyone's data.
-  let canViewAllAgents = ["SUPER_ADMIN", "LOGISTICS_MANAGER"].includes(req.user.adminSubRole);
+  let canViewAllAgents = ["SUPER_ADMIN", "LOGISTICS_MANAGER"].includes(
+    req.user.adminSubRole,
+  );
   if (!canViewAllAgents && req.user.adminSubRole === "ROLE_ADMIN") {
-    const perm = await prisma.adminRolePermission.findUnique({ where: { userId: req.user.id } });
+    const perm = await prisma.adminRolePermission.findUnique({
+      where: { userId: req.user.id },
+    });
     canViewAllAgents = !!perm?.canViewAnalytics;
   }
 
   // Everyone else (rank-and-file support agents) only see their own data
-  const scopedAgentId = canViewAllAgents ? (agentId || undefined) : req.user.id;
+  const scopedAgentId = canViewAllAgents ? agentId || undefined : req.user.id;
 
   const ticketWhere = {
     createdAt: { gte: fromDate, lte: toDate },
@@ -608,7 +630,11 @@ async function getAgentKpi(req, res) {
     return res.send(csv);
   }
 
-  return success(res, { kpi, team, isSelfScoped: !canViewAllAgents }, "Agent KPI report");
+  return success(
+    res,
+    { kpi, team, isSelfScoped: !canViewAllAgents },
+    "Agent KPI report",
+  );
 }
 
 // ─── Sprint 6: Ticket Escalation Job ─────────────────────────────────────────
@@ -651,7 +677,7 @@ async function runEscalationJob() {
 
       // Notify team lead in-app
       if (teamLead) {
-        await prisma.notification.create({
+        const escalationNotification = await prisma.notification.create({
           data: {
             userId: teamLead.id,
             type: "SYSTEM",
@@ -660,6 +686,7 @@ async function runEscalationJob() {
             data: { ticketId: ticket.id, ticketNumber: ticket.ticketNumber },
           },
         });
+        notify(teamLead.id, escalationNotification);
       }
 
       escalated++;

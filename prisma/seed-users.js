@@ -53,7 +53,9 @@ async function upsertUser({
       isActive: true,
     },
   });
-  console.log(`  ✓ ${role}${adminSubRole ? "/" + adminSubRole : ""}${enterpriseRole ? "/" + enterpriseRole : ""}  ${email}  (id: ${user.id})`);
+  console.log(
+    `  ✓ ${role}${adminSubRole ? "/" + adminSubRole : ""}${enterpriseRole ? "/" + enterpriseRole : ""}  ${email}  (id: ${user.id})`,
+  );
   return user;
 }
 
@@ -102,7 +104,9 @@ async function main() {
       createdBy: superAdmin.id,
     },
   });
-  console.log("    → granted canManageRates/Shipments/Tickets/Analytics/Surcharges to role.admin@bowago.dev");
+  console.log(
+    "    → granted canManageRates/Shipments/Tickets/Analytics/Surcharges to role.admin@bowago.dev",
+  );
 
   // ── Enterprise tenant (one company, all five roles) ─────────────────────
   console.log("\nEnterprise (Acme Logistics Ltd):");
@@ -115,7 +119,7 @@ async function main() {
   });
   // The master's own company profile fields (optional, but nice for testing
   // the Company Settings page)
-  await prisma.user.update({
+  http: await prisma.user.update({
     where: { id: master.id },
     data: {
       companyName: "Acme Logistics Ltd",
@@ -172,7 +176,9 @@ async function main() {
     phone: "+2348000000001",
   });
 
-  console.log("\nDone. Log in with any email above and password: " + PASSWORD + "\n");
+  console.log(
+    "\nDone. Log in with any email above and password: " + PASSWORD + "\n",
+  );
 }
 
 main()

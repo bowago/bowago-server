@@ -12,15 +12,120 @@
 
 const nodemailer = require("nodemailer");
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_PORT === "465",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+// ─── Provider selection ─────────────────────────────────────────────────────
+// Three supported configurations, checked in this priority order:
+//
+//   1. RESEND_API_KEY (recommended if SMTP ports are blocked on your
+//      network) — sends over Resend's HTTPS API instead of SMTP entirely.
+//      This sidesteps outbound-port blocking completely: HTTPS/443 is
+//      essentially never blocked the way SMTP ports 587/465/25 commonly
+//      are on residential ISPs, school/corporate networks, and some cloud
+//      providers. Sign up free at resend.com, verify a sending domain (or
+//      use their shared onboarding domain for testing), grab an API key.
+//   2. EMAIL_SERVICE=gmail (or another nodemailer well-known service) — the
+//      SMTP path. Uses Google's own correct host/port/TLS settings
+//      internally, so "wrong host/port" isn't a possible failure mode, but
+//      it's still SMTP and still subject to your network blocking those
+//      ports outbound. Use a Gmail App Password for SMTP_PASS, not your
+//      normal password: myaccount.google.com/apppasswords
+//   3. SMTP_HOST/SMTP_PORT (manual) — a custom/self-hosted SMTP server, or
+//      a provider nodemailer doesn't have a shortcut for.
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const EMAIL_SERVICE = process.env.EMAIL_SERVICE; // e.g. "gmail"
+
+let resendClient = null;
+if (RESEND_API_KEY) {
+  const { Resend } = require("resend");
+  resendClient = new Resend(RESEND_API_KEY);
+}
+
+const SMTP_CONFIGURED = !!(
+  process.env.SMTP_USER &&
+  process.env.SMTP_PASS &&
+  (EMAIL_SERVICE || process.env.SMTP_HOST)
+);
+const EMAIL_CONFIGURED = !!RESEND_API_KEY || SMTP_CONFIGURED;
+
+if (!EMAIL_CONFIGURED) {
+  console.error(
+    "\n[email.js] ⚠️  Email is NOT configured — every send (invites, OTPs, " +
+      "invoices, notifications) will fail until this is set up.\n" +
+      `  RESEND_API_KEY: ${RESEND_API_KEY ? "set" : "not set"}\n` +
+      `  EMAIL_SERVICE: ${EMAIL_SERVICE || "not set"}\n` +
+      `  SMTP_HOST: ${process.env.SMTP_HOST ? "set" : "not set"}\n` +
+      `  SMTP_USER: ${process.env.SMTP_USER ? "set" : "MISSING"}\n` +
+      `  SMTP_PASS: ${process.env.SMTP_PASS ? "set" : "MISSING"}\n\n` +
+      "  Recommended if SMTP ports are blocked on your network: sign up " +
+      "free at resend.com and set RESEND_API_KEY — sends over HTTPS, not " +
+      "SMTP, so outbound port blocking can't affect it.\n" +
+      "  Otherwise: EMAIL_SERVICE=gmail + SMTP_USER=<your gmail> + " +
+      "SMTP_PASS=<16-char App Password from myaccount.google.com/apppasswords>\n",
+  );
+} else if (RESEND_API_KEY) {
+  console.log("[email.js] Email configured via Resend HTTP API.");
+} else if (EMAIL_SERVICE) {
+  console.log(
+    `[email.js] Email configured via SMTP service shortcut: ${EMAIL_SERVICE} as ${process.env.SMTP_USER}`,
+  );
+} else {
+  console.log(
+    `[email.js] Email configured via manual SMTP: ${process.env.SMTP_HOST}:${process.env.SMTP_PORT || 587} as ${process.env.SMTP_USER}`,
+  );
+}
+
+// Only construct the SMTP transporter if we're actually going to use it —
+// no point paying nodemailer's setup cost (or triggering its own internal
+// checks) when Resend is configured and will be used for every send instead.
+const transporter =
+  !RESEND_API_KEY && SMTP_CONFIGURED
+    ? EMAIL_SERVICE
+      ? nodemailer.createTransport({
+          service: EMAIL_SERVICE,
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+          },
+        })
+      : nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: parseInt(process.env.SMTP_PORT) || 587,
+          secure: process.env.SMTP_PORT === "465",
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+          },
+        })
+    : null;
+
+// One-time connection check at startup (SMTP path only — Resend's HTTPS
+// API doesn't need this, failures there show up per-request instead).
+// Verifies the transporter can actually authenticate with the SMTP server
+// (catches wrong password, IP not whitelisted, etc.) rather than only
+// finding out on the first real send attempt, potentially days after deploy.
+if (transporter) {
+  transporter.verify((err) => {
+    if (err) {
+      console.error(
+        `[email.js] ⚠️  SMTP connection verification FAILED: ${err.message}\n` +
+          (err.code === "ETIMEDOUT" || err.code === "ECONNREFUSED"
+            ? "  This is a NETWORK problem, not a credentials problem — the " +
+              "connection to the mail server never completed. Your network/" +
+              "ISP/firewall is very likely blocking outbound SMTP ports " +
+              "(587/465/25), which some ISPs and corporate/school networks " +
+              "do by default.\n" +
+              "  Fix: set RESEND_API_KEY instead — see the note at the top " +
+              "of this file. It sends over HTTPS, which this kind of block " +
+              "doesn't affect."
+            : "  This usually means wrong credentials — for Gmail, make sure " +
+              "SMTP_PASS is a 16-character App Password from " +
+              "myaccount.google.com/apppasswords, not your normal account " +
+              "password (Google rejects plain-password SMTP auth entirely)."),
+      );
+    } else {
+      console.log("[email.js] ✓ SMTP connection verified successfully.");
+    }
+  });
+}
 
 const FROM = process.env.EMAIL_FROM || "BowaGO <noreply@bowago.ng>";
 const FRONTEND = process.env.FRONTEND_URL || "https://bowago.vercel.app";
@@ -110,7 +215,61 @@ function emailShell(bodyHtml, { preheader = "" } = {}) {
 // ─── Generic send ─────────────────────────────────────────────────────────────
 
 async function sendEmail({ to, subject, html, text }) {
-  return transporter.sendMail({ from: FROM, to, subject, html, text });
+  if (!EMAIL_CONFIGURED) {
+    console.error(
+      `[email.js] ✗ Skipped sending "${subject}" to ${to} — email is not configured (see startup warning above).`,
+    );
+    throw new Error("Email is not configured on this server");
+  }
+
+  // Resend takes priority when configured — sends over HTTPS, so it isn't
+  // subject to the outbound-SMTP-port blocking that SMTP (via transporter
+  // below) can run into on some networks.
+  if (resendClient) {
+    try {
+      const { data, error } = await resendClient.emails.send({
+        from: FROM,
+        to,
+        subject,
+        html,
+        text,
+      });
+      if (error) {
+        console.error(
+          `[email.js] ✗ Resend failed to send "${subject}" to ${to}: ${error.message}`,
+        );
+        throw new Error(error.message);
+      }
+      console.log(
+        `[email.js] ✓ Sent "${subject}" to ${to} via Resend (id: ${data?.id})`,
+      );
+      return data;
+    } catch (err) {
+      console.error(
+        `[email.js] ✗ Failed to send "${subject}" to ${to} via Resend: ${err.message}`,
+      );
+      throw err;
+    }
+  }
+
+  try {
+    const info = await transporter.sendMail({
+      from: FROM,
+      to,
+      subject,
+      html,
+      text,
+    });
+    console.log(
+      `[email.js] ✓ Sent "${subject}" to ${to} via SMTP (messageId: ${info.messageId}${info.accepted?.length ? `, accepted: ${info.accepted.join(",")}` : ""}${info.rejected?.length ? `, REJECTED: ${info.rejected.join(",")}` : ""})`,
+    );
+    return info;
+  } catch (err) {
+    console.error(
+      `[email.js] ✗ Failed to send "${subject}" to ${to} via SMTP: ${err.message}`,
+    );
+    throw err;
+  }
 }
 
 // ─── OTP / Verification ───────────────────────────────────────────────────────

@@ -88,8 +88,8 @@ async function generateQuote(req, res) {
   let declaredValueKobo = null;
   if (insuranceSelected && declaredValue) {
     const [ratePercent, minPremiumNaira] = await Promise.all([
-      getNumberSetting('insurance.rate_percent'),
-      getNumberSetting('insurance.min_premium_naira'),
+      getNumberSetting("insurance.rate_percent"),
+      getNumberSetting("insurance.min_premium_naira"),
     ]);
     declaredValueKobo = toKobo(declaredValue);
     const minPremiumKobo = toKobo(minPremiumNaira);
@@ -134,6 +134,11 @@ async function generateQuote(req, res) {
       remoteAreaFeeKobo: remoteKobo,
       vatKobo,
       totalPriceKobo,
+      // Full breakdown as-computed, so any custom/ad-hoc surcharge type
+      // (beyond fuel/remote-area/VAT) is preserved exactly as the customer
+      // saw it at quote time — the three *Kobo columns above only cover the
+      // three built-in types.
+      surchargeBreakdown: quote.surchargeBreakdown ?? [],
       insuranceSelected: !!insuranceSelected,
       declaredValueKobo,
       insurancePremiumKobo,
@@ -188,7 +193,6 @@ async function generateQuote(req, res) {
     },
     "Quote generated",
   );
-
 }
 
 // ─── Get Quote by ID ──────────────────────────────────────────────────────────
@@ -236,7 +240,10 @@ async function expireStaleQuotes() {
         })),
       })
       .catch((err) =>
-        console.error("[Quotes] Failed to create expiry notifications:", err.message),
+        console.error(
+          "[Quotes] Failed to create expiry notifications:",
+          err.message,
+        ),
       );
   }
 

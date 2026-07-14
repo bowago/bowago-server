@@ -1,16 +1,3 @@
-/**
- * Socket.IO — Real-Time Tracking Service
- * Sprint 4: PRD spec — WebSocket live update every 10 sec; fallback to polling (5 sec).
- *
- * Rooms:
- *   tracking:{trackingNumber}  — guest/public tracking page joins this room
- *   user:{userId}              — authenticated user joins their personal room
- *
- * Events emitted to clients:
- *   shipment:update  — { trackingNumber, status, currentLocation, timeline, eta }
- *   notification:new — { id, title, body, type, createdAt }   (to user room)
- */
-
 let _io = null;
 
 /**
@@ -19,41 +6,53 @@ let _io = null;
  * @param {import('http').Server} httpServer
  */
 function init(httpServer) {
-  const { Server } = require('socket.io');
+  const { Server } = require("socket.io");
 
   _io = new Server(httpServer, {
     cors: {
-      origin: process.env.CORS_ORIGIN || '*',
-      methods: ['GET', 'POST'],
+      origin: process.env.CORS_ORIGIN || "*",
+      methods: ["GET", "POST"],
     },
     // Fallback: if WS transport fails, drop back to polling
-    transports: ['websocket', 'polling'],
+    transports: ["websocket", "polling"],
   });
 
-  _io.on('connection', (socket) => {
+  _io.on("connection", (socket) => {
     // ─── Guest: join a public tracking room ─────────────────────────────────
-    socket.on('track:join', (trackingNumber) => {
-      if (trackingNumber && typeof trackingNumber === 'string') {
+    socket.on("track:join", (trackingNumber) => {
+      if (trackingNumber && typeof trackingNumber === "string") {
         const room = `tracking:${trackingNumber.toUpperCase()}`;
         socket.join(room);
-        socket.emit('track:joined', { room, trackingNumber });
+        socket.emit("track:joined", { room, trackingNumber });
       }
     });
 
-    socket.on('track:leave', (trackingNumber) => {
+    socket.on("track:leave", (trackingNumber) => {
       if (trackingNumber) {
         socket.leave(`tracking:${trackingNumber.toUpperCase()}`);
       }
     });
 
     // ─── Authenticated user: join personal room ──────────────────────────────
-    socket.on('user:join', (userId) => {
-      if (userId && typeof userId === 'string') {
+    socket.on("user:join", (userId) => {
+      if (userId && typeof userId === "string") {
         socket.join(`user:${userId}`);
       }
     });
 
-    socket.on('disconnect', () => {
+    socket.on("ticket:join", (ticketId) => {
+      if (ticketId && typeof ticketId === "string") {
+        socket.join(`ticket:${ticketId}`);
+      }
+    });
+
+    socket.on("ticket:leave", (ticketId) => {
+      if (ticketId) {
+        socket.leave(`ticket:${ticketId}`);
+      }
+    });
+
+    socket.on("disconnect", () => {
       // Socket.IO auto-removes from rooms on disconnect
     });
   });
@@ -76,27 +75,27 @@ function emitShipmentUpdate(shipment, timeline = []) {
   // PRD: address masking for public room (non-logged-in guests only see city/state)
   const payload = {
     trackingNumber: shipment.trackingNumber,
-    status:         shipment.status,
-    serviceType:    shipment.serviceType,
+    status: shipment.status,
+    serviceType: shipment.serviceType,
     estimatedDelivery: shipment.estimatedDelivery,
     // Masked location — full address hidden from public room
     currentLocation: shipment.recipientState
       ? `${shipment.recipientCity}, ${shipment.recipientState}`
       : shipment.recipientCity || null,
     timeline: timeline.map((e) => ({
-      status:      e.status,
+      status: e.status,
       description: e.description,
-      location:    e.location || null,
-      timestamp:   e.createdAt,
+      location: e.location || null,
+      timestamp: e.createdAt,
     })),
     updatedAt: shipment.updatedAt,
   };
 
-  _io.to(room).emit('shipment:update', payload);
+  _io.to(room).emit("shipment:update", payload);
 
   // Also emit to the owner's personal room (full unmasked payload)
   if (shipment.customerId) {
-    _io.to(`user:${shipment.customerId}`).emit('shipment:update', {
+    _io.to(`user:${shipment.customerId}`).emit("shipment:update", {
       ...payload,
       currentLocation: shipment.recipientAddress
         ? `${shipment.recipientAddress}, ${shipment.recipientCity}, ${shipment.recipientState}`
@@ -114,15 +113,45 @@ function emitShipmentUpdate(shipment, timeline = []) {
  */
 function emitNotification(userId, notification) {
   if (!_io || !userId) return;
-  _io.to(`user:${userId}`).emit('notification:new', {
-    id:        notification.id,
-    type:      notification.type,
-    title:     notification.title,
-    body:      notification.body,
-    data:      notification.data || null,
-    isRead:    notification.isRead,
+  _io.to(`user:${userId}`).emit("notification:new", {
+    id: notification.id,
+    type: notification.type,
+    title: notification.title,
+    body: notification.body,
+    data: notification.data || null,
+    isRead: notification.isRead,
     createdAt: notification.createdAt,
   });
+}
+
+/**
+ * Push a new support ticket message to everyone currently viewing that
+ * ticket. Matches frontend components/ui/Chat.tsx, which listens for
+ * exactly this event name.
+ *
+ * @param {string} ticketId
+ * @param {object} message   Prisma SupportMessage record
+ * @param {object} author    { id, firstName, lastName, role }
+ */
+function emitTicketMessage(ticketId, message, author) {
+  if (!_io || !ticketId) return;
+  _io.to(`ticket:${ticketId}`).emit("ticket:message", {
+    id: message.id,
+    body: message.body,
+    createdAt: message.createdAt,
+    author,
+  });
+}
+
+/**
+ * Push a ticket status/assignment/priority change to everyone viewing it.
+ *
+ * @param {string} ticketId
+ * @param {object} changes  { status, assignedToId, priority }
+ */
+function emitTicketUpdate(ticketId, changes) {
+  if (!_io || !ticketId) return;
+  _io.to(`ticket:${ticketId}`).emit("ticket:update", changes);
 }
 
 /**
@@ -133,4 +162,11 @@ function getIO() {
   return _io;
 }
 
-module.exports = { init, emitShipmentUpdate, emitNotification, getIO };
+module.exports = {
+  init,
+  emitShipmentUpdate,
+  emitNotification,
+  emitTicketMessage,
+  emitTicketUpdate,
+  getIO,
+};

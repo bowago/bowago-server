@@ -52,13 +52,18 @@ async function register(req, res) {
     },
   });
 
-  // Send email verification OTP
-  await sendOtp(user.id, email, "EMAIL_VERIFY");
+  // Send email verification OTP — delivery failures no longer throw (see
+  // otp.service.js), so a downstream SMTP outage can't turn a successful
+  // account creation into a 500 that makes it look like registration itself
+  // failed. The response reflects what actually happened instead.
+  const otpResult = await sendOtp(user.id, email, "EMAIL_VERIFY");
 
   return success(
     res,
-    { userId: user.id, email },
-    "Registration successful. Check your email for verification code.",
+    { userId: user.id, email, emailDelivered: otpResult.delivered },
+    otpResult.delivered
+      ? "Registration successful. Check your email for verification code."
+      : 'Registration successful, but the verification email failed to send. Use "Resend code" in a moment, or contact support.',
     201,
   );
 }
@@ -253,7 +258,9 @@ async function setup2FA(req, res) {
   // returned so the frontend can show "Verify to continue" copy instead of
   // "Enable 2FA" copy.
   const alreadyEnabled = !!user.twoFactorEnabled;
-  const effectiveMethod = alreadyEnabled ? user.twoFactorMethod || method : method;
+  const effectiveMethod = alreadyEnabled
+    ? user.twoFactorMethod || method
+    : method;
 
   if (effectiveMethod === "SMS") {
     if (!isSmsConfigured()) {
@@ -281,7 +288,12 @@ async function setup2FA(req, res) {
         await sendOtp(user.id, user.email, "TWO_FACTOR_SETUP", "EMAIL");
         return success(
           res,
-          { method: "SMS", deliveryChannel: "EMAIL", smsFallback: true, alreadyEnabled },
+          {
+            method: "SMS",
+            deliveryChannel: "EMAIL",
+            smsFallback: true,
+            alreadyEnabled,
+          },
           "SMS unavailable — verification code sent to your email instead. Enter it to confirm 2FA setup.",
         );
       } catch (emailErr) {

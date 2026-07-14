@@ -1,6 +1,8 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
 const { success, getPagination, buildMeta } = require("../utils/helpers");
+const pushService = require("../services/push.service");
+const { notify } = require("../services/notify.service");
 
 async function listNotifications(req, res) {
   const { page, limit, skip } = getPagination(req.query);
@@ -74,13 +76,18 @@ async function bulkDeleteNotifications(req, res) {
     throw new ApiError(400, '"ids" must be an array of notification IDs');
   }
 
-  const where = ids && ids.length > 0
-    ? { userId: req.user.id, id: { in: ids } }
-    : { userId: req.user.id };
+  const where =
+    ids && ids.length > 0
+      ? { userId: req.user.id, id: { in: ids } }
+      : { userId: req.user.id };
 
   const result = await prisma.notification.deleteMany({ where });
 
-  return success(res, { deleted: result.count }, `${result.count} notification(s) deleted`);
+  return success(
+    res,
+    { deleted: result.count },
+    `${result.count} notification(s) deleted`,
+  );
 }
 
 // Admin: broadcast notification
@@ -145,6 +152,38 @@ async function markAllRead(req, res) {
   return success(res, {}, "All notifications marked as read");
 }
 
+// ─── GET /notifications/vapid-public-key ─────────────────────────────────────
+// The frontend needs this to call pushManager.subscribe({applicationServerKey}).
+// Returns null if push isn't configured yet (env vars unset) so the frontend
+// can just skip offering the "enable push" toggle rather than erroring.
+async function getVapidPublicKey(req, res) {
+  return success(res, { publicKey: process.env.VAPID_PUBLIC_KEY || null });
+}
+
+// ─── POST /notifications/push-subscribe ──────────────────────────────────────
+async function subscribeToPush(req, res) {
+  const { subscription } = req.body;
+  if (!subscription) throw new ApiError(400, "subscription is required");
+
+  await pushService.saveSubscription(
+    req.user.id,
+    subscription,
+    req.headers["user-agent"],
+  );
+
+  return success(res, {}, "Push notifications enabled");
+}
+
+// ─── DELETE /notifications/push-subscribe ────────────────────────────────────
+async function unsubscribeFromPush(req, res) {
+  const { endpoint } = req.body;
+  if (!endpoint) throw new ApiError(400, "endpoint is required");
+
+  await pushService.removeSubscription(endpoint);
+
+  return success(res, {}, "Push notifications disabled");
+}
+
 module.exports = {
   listNotifications,
   markRead,
@@ -154,4 +193,7 @@ module.exports = {
   updateFcmToken,
   getUnreadCount,
   markAllRead,
+  getVapidPublicKey,
+  subscribeToPush,
+  unsubscribeFromPush,
 };

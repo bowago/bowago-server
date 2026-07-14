@@ -2,9 +2,11 @@ const router = require("express").Router();
 const shipmentController = require("../controllers/shipment.controller");
 const {
   authenticate,
+  optionalAuth,
   requireAdmin,
   requireLogisticsOrAbove,
   requireShipmentOpsManagement,
+  requireShipmentDispatchAccess,
   requireEnterprise,
 } = require("../middleware/auth");
 const {
@@ -71,7 +73,11 @@ const {
  *       404:
  *         description: Tracking number not found
  */
-router.get("/track/:trackingNumber", shipmentController.trackShipment);
+router.get(
+  "/track/:trackingNumber",
+  optionalAuth,
+  shipmentController.trackShipment,
+);
 
 // ─── All routes below require authentication ──────────────────────────────────
 router.use(authenticate);
@@ -248,7 +254,11 @@ router.get("/my", shipmentController.listMyShipments);
  *       403:
  *         description: Enterprise account required
  */
-router.get("/enterprise", requireEnterprise, shipmentController.enterpriseListShipments);
+router.get(
+  "/enterprise",
+  requireEnterprise,
+  shipmentController.enterpriseListShipments,
+);
 
 // ─── NAMED ROUTES — must all come BEFORE /:id ─────────────────────────────────
 // Express matches routes top-to-bottom. /:id would swallow /my, /admin/stats,
@@ -592,7 +602,7 @@ router.post("/:id/cancel", shipmentController.cancelShipment);
  */
 router.patch(
   "/:id/status",
-  requireShipmentOpsManagement, // Internal ops: platform-wide status updates across all shipments
+  requireShipmentDispatchAccess, // Internal ops (platform-wide) OR the shipment's own enterprise company's ROLE_MASTER/ROLE_DISPATCHER (ownership enforced in the controller)
   shipmentController.updateShipmentStatus,
 );
 

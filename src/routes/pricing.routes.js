@@ -1,8 +1,15 @@
-const router = require('express').Router();
-const pricingController = require('../controllers/pricing.controller');
-const deliverySLAController = require('../controllers/deliverySLA.controller');
-const { authenticate, requireAdmin, requireLogisticsOrAbove, requireSuperAdmin, requireRateManagement } = require('../middleware/auth');
-const { uploadImport } = require('../config/cloudinary');
+const router = require("express").Router();
+const pricingController = require("../controllers/pricing.controller");
+const deliverySLAController = require("../controllers/deliverySLA.controller");
+const {
+  authenticate,
+  optionalAuth,
+  requireAdmin,
+  requireLogisticsOrAbove,
+  requireSuperAdmin,
+  requireRateManagement,
+} = require("../middleware/auth");
+const { uploadImport } = require("../config/cloudinary");
 
 /**
  * @swagger
@@ -72,7 +79,7 @@ const { uploadImport } = require('../config/cloudinary');
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/quote', pricingController.getQuote);
+router.post("/quote", optionalAuth, pricingController.getQuote);
 
 /**
  * @swagger
@@ -114,7 +121,7 @@ router.post('/quote', pricingController.getQuote);
  *                       items:
  *                         $ref: '#/components/schemas/City'
  */
-router.get('/cities', pricingController.listCities);
+router.get("/cities", pricingController.listCities);
 
 /**
  * @swagger
@@ -141,7 +148,7 @@ router.get('/cities', pricingController.listCities);
  *                       items:
  *                         $ref: '#/components/schemas/BoxDimension'
  */
-router.get('/dimensions', pricingController.listDimensions);
+router.get("/dimensions", pricingController.listDimensions);
 
 /**
  * @swagger
@@ -173,7 +180,7 @@ router.get('/dimensions', pricingController.listDimensions);
  *                       items:
  *                         $ref: '#/components/schemas/PriceBand'
  */
-router.get('/price-bands', pricingController.listPriceBands);
+router.get("/price-bands", pricingController.listPriceBands);
 
 // ─── Admin routes below ───────────────────────────────────────────────────────
 // PRD: only roles with canManageRates capability can write pricing data.
@@ -216,7 +223,7 @@ router.use(requireRateManagement);
  *       403:
  *         description: Admin access required
  */
-router.post('/cities', pricingController.upsertCity);
+router.post("/cities", pricingController.upsertCity);
 
 /**
  * @swagger
@@ -236,8 +243,8 @@ router.post('/cities', pricingController.upsertCity);
  *       403:
  *         description: Super admin access required
  */
-router.patch('/cities/:id', requireSuperAdmin, pricingController.updateCity);
-router.delete('/cities/:id', requireSuperAdmin, pricingController.deleteCity);
+router.patch("/cities/:id", requireSuperAdmin, pricingController.updateCity);
+router.delete("/cities/:id", requireSuperAdmin, pricingController.deleteCity);
 
 /**
  * @swagger
@@ -267,7 +274,7 @@ router.delete('/cities/:id', requireSuperAdmin, pricingController.deleteCity);
  *       403:
  *         description: Admin access required
  */
-router.post('/dimensions', pricingController.upsertDimension);
+router.post("/dimensions", pricingController.upsertDimension);
 
 /**
  * @swagger
@@ -322,9 +329,17 @@ router.post('/dimensions', pricingController.upsertDimension);
  *       409:
  *         description: Category ID already in use
  */
-router.patch('/dimensions/:id', requireSuperAdmin, pricingController.updateDimension);
+router.patch(
+  "/dimensions/:id",
+  requireSuperAdmin,
+  pricingController.updateDimension,
+);
 
-router.delete('/dimensions/:id', requireSuperAdmin, pricingController.deleteDimension);
+router.delete(
+  "/dimensions/:id",
+  requireSuperAdmin,
+  pricingController.deleteDimension,
+);
 
 /**
  * @swagger
@@ -356,7 +371,7 @@ router.delete('/dimensions/:id', requireSuperAdmin, pricingController.deleteDime
  *       403:
  *         description: Admin access required
  */
-router.post('/price-bands', pricingController.createPriceBand);
+router.post("/price-bands", pricingController.createPriceBand);
 
 /**
  * @swagger
@@ -380,7 +395,7 @@ router.post('/price-bands', pricingController.createPriceBand);
  *       403:
  *         description: Admin access required
  */
-router.put('/price-bands/:id', pricingController.updatePriceBand);
+router.put("/price-bands/:id", pricingController.updatePriceBand);
 
 /**
  * @swagger
@@ -399,7 +414,7 @@ router.put('/price-bands/:id', pricingController.updatePriceBand);
  *       403:
  *         description: Admin access required
  */
-router.delete('/price-bands/:id', pricingController.deletePriceBand);
+router.delete("/price-bands/:id", pricingController.deletePriceBand);
 
 /**
  * @swagger
@@ -429,7 +444,7 @@ router.delete('/price-bands/:id', pricingController.deletePriceBand);
  *       403:
  *         description: Admin access required
  */
-router.get('/zone-matrix', pricingController.getZoneMatrix);
+router.get("/zone-matrix", pricingController.getZoneMatrix);
 
 /**
  * @swagger
@@ -455,7 +470,7 @@ router.get('/zone-matrix', pricingController.getZoneMatrix);
  *       403:
  *         description: Admin access required
  */
-router.post('/zone-matrix', pricingController.upsertZoneMatrix);
+router.post("/zone-matrix", pricingController.upsertZoneMatrix);
 
 /**
  * @swagger
@@ -506,7 +521,13 @@ router.post('/zone-matrix', pricingController.upsertZoneMatrix);
  *       403:
  *         description: Admin access required
  */
-router.post('/import', authenticate, requireAdmin, uploadImport.single('file'), pricingController.importPricingSheet);
+router.post(
+  "/import",
+  authenticate,
+  requireAdmin,
+  uploadImport.single("file"),
+  pricingController.importPricingSheet,
+);
 
 /**
  * @swagger
@@ -534,12 +555,26 @@ router.post('/import', authenticate, requireAdmin, uploadImport.single('file'), 
  */
 
 // ─── Delivery SLA (zone-based delivery days) ──────────────────────────────────
-router.get('/delivery-sla', deliverySLAController.listSLAs);
-router.patch('/delivery-sla/:id', authenticate, requireSuperAdmin, deliverySLAController.updateSLA);
-router.patch('/delivery-sla/zone/:zone/service/:serviceType', authenticate, requireSuperAdmin, deliverySLAController.updateSLAByZoneService);
+router.get("/delivery-sla", deliverySLAController.listSLAs);
+router.patch(
+  "/delivery-sla/:id",
+  authenticate,
+  requireSuperAdmin,
+  deliverySLAController.updateSLA,
+);
+router.patch(
+  "/delivery-sla/zone/:zone/service/:serviceType",
+  authenticate,
+  requireSuperAdmin,
+  deliverySLAController.updateSLAByZoneService,
+);
 
-router.get('/export', authenticate, requireSuperAdmin, pricingController.exportPricingSheet);
-
+router.get(
+  "/export",
+  authenticate,
+  requireSuperAdmin,
+  pricingController.exportPricingSheet,
+);
 
 /**
  * @swagger
@@ -570,7 +605,7 @@ router.get('/export', authenticate, requireSuperAdmin, pricingController.exportP
  *       404:
  *         description: Zone matrix entry not found
  */
-router.patch('/zone-matrix/:id/pause', pricingController.pauseZoneMatrix);
+router.patch("/zone-matrix/:id/pause", pricingController.pauseZoneMatrix);
 
 /**
  * @swagger
@@ -600,7 +635,10 @@ router.patch('/zone-matrix/:id/pause', pricingController.pauseZoneMatrix);
  *       404:
  *         description: Zone matrix entry not found
  */
-router.patch('/zone-matrix/:id/reinstate', pricingController.reinstateZoneMatrix);
+router.patch(
+  "/zone-matrix/:id/reinstate",
+  pricingController.reinstateZoneMatrix,
+);
 
 /**
  * @swagger
@@ -626,8 +664,16 @@ router.patch('/zone-matrix/:id/reinstate', pricingController.reinstateZoneMatrix
  *       403:
  *         description: Super Admin access required
  */
-router.patch('/zone-matrix/:id', requireSuperAdmin, pricingController.updateZoneMatrix);
-router.delete('/zone-matrix/:id', requireSuperAdmin, pricingController.deleteZoneMatrix);
+router.patch(
+  "/zone-matrix/:id",
+  requireSuperAdmin,
+  pricingController.updateZoneMatrix,
+);
+router.delete(
+  "/zone-matrix/:id",
+  requireSuperAdmin,
+  pricingController.deleteZoneMatrix,
+);
 
 /**
  * @swagger
@@ -674,7 +720,7 @@ router.delete('/zone-matrix/:id', requireSuperAdmin, pricingController.deleteZon
  *                       description: Box dimension types configured
  *                       example: 10
  */
-router.get('/stats', pricingController.getPricingStats);
+router.get("/stats", pricingController.getPricingStats);
 
 /**
  * @swagger
@@ -700,6 +746,6 @@ router.get('/stats', pricingController.getPricingStats);
  *       404:
  *         description: Audit log entry not found
  */
-router.post('/rollback/:auditLogId', pricingController.rollbackPriceBand);
+router.post("/rollback/:auditLogId", pricingController.rollbackPriceBand);
 
 module.exports = router;

@@ -1,10 +1,11 @@
-const { prisma } = require('../config/db');
-const { ApiError } = require('../utils/ApiError');
-const { success } = require('../utils/helpers');
+const { prisma } = require("../config/db");
+const { ApiError } = require("../utils/ApiError");
+const { success } = require("../utils/helpers");
 
 // ─── Auto-generate human label ───────────────────────────────────────────────
 function buildLabel(minDays, maxDays) {
-  if (minDays === maxDays) return `${minDays} business day${minDays === 1 ? '' : 's'}`;
+  if (minDays === maxDays)
+    return `${minDays} business day${minDays === 1 ? "" : "s"}`;
   return `${minDays}–${maxDays} business days`;
 }
 
@@ -12,7 +13,7 @@ function buildLabel(minDays, maxDays) {
 // Public (used by frontend to show zone-aware delivery times in booking modal)
 async function listSLAs(req, res) {
   const slas = await prisma.deliverySLA.findMany({
-    orderBy: [{ zone: 'asc' }, { serviceType: 'asc' }],
+    orderBy: [{ zone: "asc" }, { serviceType: "asc" }],
   });
   return success(res, { slas });
 }
@@ -23,9 +24,12 @@ async function updateSLA(req, res) {
   const { id } = req.params;
   const { minDays, maxDays } = req.body;
 
-  if (!minDays || !maxDays) throw new ApiError(400, 'minDays and maxDays are required');
-  if (minDays > maxDays) throw new ApiError(400, 'minDays cannot be greater than maxDays');
-  if (minDays < 0 || maxDays < 0) throw new ApiError(400, 'Days must be positive numbers');
+  if (!minDays || !maxDays)
+    throw new ApiError(400, "minDays and maxDays are required");
+  if (minDays > maxDays)
+    throw new ApiError(400, "minDays cannot be greater than maxDays");
+  if (minDays < 0 || maxDays < 0)
+    throw new ApiError(400, "Days must be positive numbers");
 
   const sla = await prisma.deliverySLA.update({
     where: { id },
@@ -36,7 +40,7 @@ async function updateSLA(req, res) {
     },
   });
 
-  return success(res, { sla }, 'Delivery SLA updated');
+  return success(res, { sla }, "Delivery SLA updated");
 }
 
 // ─── PATCH /pricing/delivery-sla/zone/:zone/service/:serviceType ─────────────
@@ -45,11 +49,18 @@ async function updateSLAByZoneService(req, res) {
   const { zone, serviceType } = req.params;
   const { minDays, maxDays } = req.body;
 
-  if (!minDays || !maxDays) throw new ApiError(400, 'minDays and maxDays are required');
-  if (Number(minDays) > Number(maxDays)) throw new ApiError(400, 'minDays cannot be greater than maxDays');
+  if (!minDays || !maxDays)
+    throw new ApiError(400, "minDays and maxDays are required");
+  if (Number(minDays) > Number(maxDays))
+    throw new ApiError(400, "minDays cannot be greater than maxDays");
 
   const sla = await prisma.deliverySLA.upsert({
-    where: { zone_serviceType: { zone: Number(zone), serviceType: serviceType.toUpperCase() } },
+    where: {
+      zone_serviceType: {
+        zone: Number(zone),
+        serviceType: serviceType.toUpperCase(),
+      },
+    },
     update: {
       minDays: Number(minDays),
       maxDays: Number(maxDays),
@@ -65,25 +76,43 @@ async function updateSLAByZoneService(req, res) {
     },
   });
 
-  return success(res, { sla }, 'Delivery SLA updated');
+  return success(res, { sla }, "Delivery SLA updated");
 }
 
 // ─── Helper: get estimated delivery date for a shipment ───────────────────────
 // Used by shipment.controller.js at booking time
-async function getEstimatedDelivery(zone, serviceType, pickupDate) {
+async function getEstimatedDelivery(zone, serviceType, pickupDate, opts = {}) {
+  const { isSameCity = false } = opts;
   const sla = await prisma.deliverySLA.findFirst({
     where: { zone: Number(zone), serviceType: serviceType.toUpperCase() },
   });
 
-  const days = sla ? sla.maxDays : getDefaultDays(serviceType);
+  // Same fix as pricing.service.js#getDeliveryEstimate: when there's no
+  // admin-configured SLA row for this zone+service, don't fall back to the
+  // generic cross-country default for an intra-city shipment — that's what
+  // was making an Abuja → Abuja shipment get scheduled for 3 business days
+  // out (the generic EXPRESS default) instead of same/next-day.
+  const days = sla
+    ? sla.maxDays
+    : isSameCity
+      ? getSameCityDefaultDays(serviceType)
+      : getDefaultDays(serviceType);
   const base = pickupDate ? new Date(pickupDate) : new Date();
   const delivery = addBusinessDays(base, days);
-  return { estimatedDelivery: delivery, slaLabel: sla?.label ?? `${days} business days` };
+  return {
+    estimatedDelivery: delivery,
+    slaLabel: sla?.label ?? `${days} business day${days === 1 ? "" : "s"}`,
+  };
 }
 
 function getDefaultDays(serviceType) {
   const defaults = { EXPRESS: 3, STANDARD: 7, ECONOMY: 14 };
   return defaults[serviceType?.toUpperCase()] ?? 7;
+}
+
+function getSameCityDefaultDays(serviceType) {
+  const defaults = { EXPRESS: 1, STANDARD: 2, ECONOMY: 3 };
+  return defaults[serviceType?.toUpperCase()] ?? 2;
 }
 
 function addBusinessDays(startDate, days) {
@@ -97,4 +126,9 @@ function addBusinessDays(startDate, days) {
   return date;
 }
 
-module.exports = { listSLAs, updateSLA, updateSLAByZoneService, getEstimatedDelivery };
+module.exports = {
+  listSLAs,
+  updateSLA,
+  updateSLAByZoneService,
+  getEstimatedDelivery,
+};

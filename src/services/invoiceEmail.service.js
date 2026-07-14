@@ -28,6 +28,7 @@ async function sendInvoiceEmail({
   invoiceNumber,
   amount,
   trackingNumber,
+  appliedDiscount, // { label, discountAmount } | null
   pdfBuffer,
 }) {
   const trackUrl = trackingNumber
@@ -48,6 +49,17 @@ async function sendInvoiceEmail({
       <p class="lbl">Amount Paid</p>
       <p class="val">${formatNaira(amount)}</p>
     </div>
+
+    ${
+      appliedDiscount
+        ? `
+    <div class="info-box" style="background:#E8F8F5;">
+      <p class="lbl">✓ ${appliedDiscount.label}</p>
+      <p class="val" style="font-size:14px;">You saved ${formatNaira(appliedDiscount.discountAmount || 0)} — already reflected in the amount above</p>
+    </div>
+    `
+        : ""
+    }
 
     ${
       trackingNumber

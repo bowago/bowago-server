@@ -1,13 +1,24 @@
-const { prisma } = require('../config/db');
-const { ApiError } = require('../utils/ApiError');
-const { success, created, getPagination, buildMeta } = require('../utils/helpers');
+const { prisma } = require("../config/db");
+const { ApiError } = require("../utils/ApiError");
+const {
+  success,
+  created,
+  getPagination,
+  buildMeta,
+} = require("../utils/helpers");
 
 // ─── Admin: Create/assign contract rate to a user ─────────────────────────────
 async function createContractRate(req, res) {
   const {
-    userId, label, serviceType,
-    discountPercent, fixedPricePerKgByZone,
-    isActive, validFrom, validUntil, notes,
+    userId,
+    label,
+    serviceType,
+    discountPercent,
+    fixedPricePerKgByZone,
+    isActive,
+    validFrom,
+    validUntil,
+    notes,
   } = req.body;
 
   // Verify user exists
@@ -15,22 +26,33 @@ async function createContractRate(req, res) {
     where: { id: userId },
     select: { id: true, firstName: true, lastName: true, email: true },
   });
-  if (!user) throw new ApiError(404, 'User not found');
+  if (!user) throw new ApiError(404, "User not found");
 
-  if (!discountPercent && !fixedPricePerKgByZone) {
-    throw new ApiError(400, 'Provide either discountPercent or fixedPricePerKgByZone');
+  const hasDiscount = discountPercent !== undefined && discountPercent !== null;
+  const hasFixed =
+    fixedPricePerKgByZone !== undefined && fixedPricePerKgByZone !== null;
+
+  if (!hasDiscount && !hasFixed) {
+    throw new ApiError(
+      400,
+      "Provide either discountPercent or fixedPricePerKgByZone",
+    );
   }
-  if (discountPercent && fixedPricePerKgByZone) {
-    throw new ApiError(400, 'Provide either discountPercent OR fixedPricePerKgByZone, not both');
+  if (hasDiscount && hasFixed) {
+    throw new ApiError(
+      400,
+      "Provide either discountPercent OR fixedPricePerKgByZone, not both",
+    );
   }
 
   // Upsert — each user can only have one contract rate
   const contractRate = await prisma.contractRate.upsert({
     where: { userId },
     update: {
-      label, serviceType: serviceType || null,
-      discountPercent: discountPercent || null,
-      fixedPricePerKgByZone: fixedPricePerKgByZone || null,
+      label,
+      serviceType: serviceType || null,
+      discountPercent: hasDiscount ? discountPercent : null,
+      fixedPricePerKgByZone: hasFixed ? fixedPricePerKgByZone : null,
       isActive: isActive !== undefined ? isActive : true,
       validFrom: validFrom ? new Date(validFrom) : null,
       validUntil: validUntil ? new Date(validUntil) : null,
@@ -38,20 +60,29 @@ async function createContractRate(req, res) {
       createdBy: req.user.id,
     },
     create: {
-      userId, label,
+      userId,
+      label,
       serviceType: serviceType || null,
-      discountPercent: discountPercent || null,
-      fixedPricePerKgByZone: fixedPricePerKgByZone || null,
+      discountPercent: hasDiscount ? discountPercent : null,
+      fixedPricePerKgByZone: hasFixed ? fixedPricePerKgByZone : null,
       isActive: isActive !== undefined ? isActive : true,
       validFrom: validFrom ? new Date(validFrom) : null,
       validUntil: validUntil ? new Date(validUntil) : null,
       notes,
       createdBy: req.user.id,
     },
-    include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } },
+    include: {
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true },
+      },
+    },
   });
 
-  return created(res, { contractRate }, `Contract rate assigned to ${user.firstName} ${user.lastName}`);
+  return created(
+    res,
+    { contractRate },
+    `Contract rate assigned to ${user.firstName} ${user.lastName}`,
+  );
 }
 
 // ─── Admin: List all contract rates ──────────────────────────────────────────
@@ -60,28 +91,42 @@ async function listContractRates(req, res) {
   const { isActive, search } = req.query;
 
   const where = {
-    ...(isActive !== undefined && { isActive: isActive === 'true' }),
+    ...(isActive !== undefined && { isActive: isActive === "true" }),
     ...(search && {
       OR: [
-        { label: { contains: search, mode: 'insensitive' } },
-        { user: { email: { contains: search, mode: 'insensitive' } } },
-        { user: { firstName: { contains: search, mode: 'insensitive' } } },
+        { label: { contains: search, mode: "insensitive" } },
+        { user: { email: { contains: search, mode: "insensitive" } } },
+        { user: { firstName: { contains: search, mode: "insensitive" } } },
       ],
     }),
   };
 
   const [rates, total] = await Promise.all([
     prisma.contractRate.findMany({
-      where, skip, take: limit,
-      orderBy: { createdAt: 'desc' },
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
       include: {
-        user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
       },
     }),
     prisma.contractRate.count({ where }),
   ]);
 
-  return res.json({ success: true, data: { rates }, meta: buildMeta(total, page, limit) });
+  return res.json({
+    success: true,
+    data: { rates },
+    meta: buildMeta(total, page, limit),
+  });
 }
 
 // ─── Admin: Get single contract rate ─────────────────────────────────────────
@@ -91,11 +136,13 @@ async function getContractRate(req, res) {
   const rate = await prisma.contractRate.findUnique({
     where: { id },
     include: {
-      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true },
+      },
     },
   });
 
-  if (!rate) throw new ApiError(404, 'Contract rate not found');
+  if (!rate) throw new ApiError(404, "Contract rate not found");
 
   return success(res, { contractRate: rate });
 }
@@ -104,11 +151,17 @@ async function getContractRate(req, res) {
 async function updateContractRate(req, res) {
   const { id } = req.params;
   const existing = await prisma.contractRate.findUnique({ where: { id } });
-  if (!existing) throw new ApiError(404, 'Contract rate not found');
+  if (!existing) throw new ApiError(404, "Contract rate not found");
 
   const {
-    label, serviceType, discountPercent,
-    fixedPricePerKgByZone, isActive, validFrom, validUntil, notes,
+    label,
+    serviceType,
+    discountPercent,
+    fixedPricePerKgByZone,
+    isActive,
+    validFrom,
+    validUntil,
+    notes,
   } = req.body;
 
   const rate = await prisma.contractRate.update({
@@ -119,27 +172,33 @@ async function updateContractRate(req, res) {
       ...(discountPercent !== undefined && { discountPercent }),
       ...(fixedPricePerKgByZone !== undefined && { fixedPricePerKgByZone }),
       ...(isActive !== undefined && { isActive }),
-      ...(validFrom !== undefined && { validFrom: validFrom ? new Date(validFrom) : null }),
-      ...(validUntil !== undefined && { validUntil: validUntil ? new Date(validUntil) : null }),
+      ...(validFrom !== undefined && {
+        validFrom: validFrom ? new Date(validFrom) : null,
+      }),
+      ...(validUntil !== undefined && {
+        validUntil: validUntil ? new Date(validUntil) : null,
+      }),
       ...(notes !== undefined && { notes }),
     },
     include: {
-      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true },
+      },
     },
   });
 
-  return success(res, { contractRate: rate }, 'Contract rate updated');
+  return success(res, { contractRate: rate }, "Contract rate updated");
 }
 
 // ─── Admin: Delete/deactivate ─────────────────────────────────────────────────
 async function deleteContractRate(req, res) {
   const { id } = req.params;
   const existing = await prisma.contractRate.findUnique({ where: { id } });
-  if (!existing) throw new ApiError(404, 'Contract rate not found');
+  if (!existing) throw new ApiError(404, "Contract rate not found");
 
   await prisma.contractRate.delete({ where: { id } });
 
-  return success(res, {}, 'Contract rate deleted');
+  return success(res, {}, "Contract rate deleted");
 }
 
 // ─── Customer: Get my contract rate (if any) ─────────────────────────────────
@@ -156,8 +215,8 @@ async function getMyContractRate(req, res) {
   await prisma.activityLog.create({
     data: {
       userId: req.user.id,
-      action: 'VIEW_CONTRACT_RATE',
-      resource: 'ContractRate',
+      action: "VIEW_CONTRACT_RATE",
+      resource: "ContractRate",
       resourceId: rate.id,
     },
   });
@@ -165,7 +224,7 @@ async function getMyContractRate(req, res) {
   return success(res, {
     contractRate: rate,
     hasContract: true,
-    discountType: rate.discountPercent ? 'PERCENT' : 'FIXED_PER_ZONE',
+    discountType: rate.discountPercent ? "PERCENT" : "FIXED_PER_ZONE",
   });
 }
 

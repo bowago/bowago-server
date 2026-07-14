@@ -4,6 +4,7 @@ const {
   authenticate,
   requireAdmin,
   requireSuperAdmin,
+  requireUserManagement,
 } = require("../middleware/auth");
 const { uploadAvatar } = require("../config/cloudinary");
 
@@ -117,8 +118,6 @@ router.patch("/me/company", authenticate, userController.updateCompanyInfo);
 // DELETE /users/me — customer deletes their own account (requires password)
 router.delete("/me", authenticate, userController.deleteOwnAccount);
 
-
-
 /**
  * @swagger
  * /users/me/saved-cards:
@@ -152,7 +151,11 @@ router.get("/me/saved-cards", authenticate, userController.listSavedCards);
  *       404:
  *         description: Saved card not found
  */
-router.patch("/me/saved-cards/:id/default", authenticate, userController.setDefaultCard);
+router.patch(
+  "/me/saved-cards/:id/default",
+  authenticate,
+  userController.setDefaultCard,
+);
 
 /**
  * @swagger
@@ -173,8 +176,11 @@ router.patch("/me/saved-cards/:id/default", authenticate, userController.setDefa
  *       404:
  *         description: Saved card not found
  */
-router.delete("/me/saved-cards/:id", authenticate, userController.deleteSavedCard);
-
+router.delete(
+  "/me/saved-cards/:id",
+  authenticate,
+  userController.deleteSavedCard,
+);
 
 /**
  * @swagger
@@ -368,7 +374,7 @@ router.delete("/me/addresses/:id", authenticate, userController.deleteAddress);
  *       403:
  *         description: Admin access required
  */
-router.get("/", authenticate, requireAdmin, userController.listUsers);
+router.get("/", authenticate, requireUserManagement, userController.listUsers);
 
 /**
  * @swagger
@@ -409,7 +415,7 @@ router.get("/", authenticate, requireAdmin, userController.listUsers);
 router.patch(
   "/:id/status",
   authenticate,
-  requireAdmin,
+  requireUserManagement,
   userController.toggleUserStatus,
 );
 
@@ -490,7 +496,12 @@ router.patch(
  *       404:
  *         description: User not found
  */
-router.get("/:id", authenticate, requireAdmin, userController.getUserById);
+router.get(
+  "/:id",
+  authenticate,
+  requireUserManagement,
+  userController.getUserById,
+);
 
 /**
  * @swagger

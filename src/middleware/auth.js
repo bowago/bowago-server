@@ -73,11 +73,20 @@ function requireSuperAdmin(req, res, next) {
 }
 
 // Covers any ADMIN-role user — used for generic read-only admin views
+// requireLogisticsOrAbove = SUPER_ADMIN | LOGISTICS_MANAGER | ROLE_ADMIN(canManageShipments)
+//
+// This has been documented with that exact contract at several call sites
+// for a while (see shipment.routes.js's assign-shipment route), but the
+// implementation itself never actually checked the capability — it was
+// just "any ADMIN, full stop." That meant canManageShipments had zero real
+// effect anywhere this guard was used: a ROLE_ADMIN with that capability
+// deliberately left off could still assign shipments, export shipment CSVs,
+// view stats, review address-change requests, manage invoices/promo
+// codes/policies/FAQs, and delete uploaded documents — every one of the 11
+// routes across 7 files that use this guard. Now it actually delegates to
+// the same capability check requireShipmentOpsManagement already uses.
 function requireLogisticsOrAbove(req, res, next) {
-  if (req.user.role !== "ADMIN") {
-    throw new ApiError(403, "Admin access required");
-  }
-  next();
+  return requireCapability("canManageShipments")(req, res, next);
 }
 
 // ─── Internal Admin Capability RBAC ────────────────────────────────────────────
@@ -144,6 +153,39 @@ const requirePromoManagement = requireCapability("canManagePromos");
 // own ROLE_DISPATCHER, which only ever touches that tenant's shipments.
 const requireShipmentOpsManagement = requireCapability("canManageShipments");
 
+// ─── Shipment status/dispatch access (internal ops OR the shipment's own
+// enterprise company) ──────────────────────────────────────────────────────
+// Two distinct groups may update a shipment's status/location:
+//   1. Internal BowaGo staff — ADMIN role with canManageShipments capability
+//      (SUPER_ADMIN/LOGISTICS_MANAGER always pass; ROLE_ADMIN needs the flag).
+//      These act platform-wide, across every company's shipments.
+//   2. An Enterprise company's own dispatch staff — ENTERPRISE role with
+//      enterpriseRole ROLE_MASTER or ROLE_DISPATCHER. These may ONLY act on
+//      shipments belonging to their own company (enforced in the controller,
+//      which has the shipment's owning customer already loaded — see
+//      shipment.controller.js#updateShipmentStatus for the company-match
+//      check). ROLE_DISPATCHER is intentionally enterprise-only — it does
+//      NOT grant access to any other company's or BowaGo's own internal
+//      shipments; that's what SUPER_ADMIN/LOGISTICS_MANAGER are for.
+// This middleware only narrows down to "is this caller in one of the two
+// eligible groups at all" — the per-shipment company-ownership check for
+// group 2 happens in the controller, since it needs the shipment loaded.
+function requireShipmentDispatchAccess(req, res, next) {
+  if (req.user.role === "ADMIN") {
+    return requireShipmentOpsManagement(req, res, next);
+  }
+  if (
+    req.user.role === "ENTERPRISE" &&
+    ["ROLE_MASTER", "ROLE_DISPATCHER"].includes(req.user.enterpriseRole)
+  ) {
+    return next();
+  }
+  throw new ApiError(
+    403,
+    "Only internal shipment-ops staff or your company's dispatcher/owner can update shipment status.",
+  );
+}
+
 // ─── Enterprise Tenant RBAC ────────────────────────────────────────────────────
 //
 // Completely separate system from Internal Admin above. Enterprise users
@@ -157,7 +199,10 @@ const requireShipmentOpsManagement = requireCapability("canManageShipments");
 //   requireEnterpriseRole('ROLE_DISPATCHER', 'ROLE_MASTER')
 function requireEnterpriseRole(...enterpriseRoles) {
   return (req, res, next) => {
-    if (req.user.role === "ENTERPRISE" && enterpriseRoles.includes(req.user.enterpriseRole)) {
+    if (
+      req.user.role === "ENTERPRISE" &&
+      enterpriseRoles.includes(req.user.enterpriseRole)
+    ) {
       return next();
     }
     throw new ApiError(
@@ -294,6 +339,7 @@ module.exports = {
   requireSurchargeManagement,
   requirePromoManagement,
   requireShipmentOpsManagement,
+  requireShipmentDispatchAccess,
   requireEnterprise,
   requireEnterpriseRole,
   optionalAuth,

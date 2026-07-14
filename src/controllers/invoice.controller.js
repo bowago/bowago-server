@@ -1,6 +1,9 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
-const { assertOwnedResourceAccess, getOrgMemberIds } = require("../utils/access");
+const {
+  assertOwnedResourceAccess,
+  getOrgMemberIds,
+} = require("../utils/access");
 const { success, getPagination, buildMeta } = require("../utils/helpers");
 const {
   generateInvoicePDF,
@@ -12,6 +15,29 @@ const {
   sendBookingConfirmationEmail,
 } = require("../services/invoiceEmail.service");
 const { cloudinary } = require("../config/cloudinary");
+const { notify } = require("../services/notify.service");
+
+// Contract-rate / promo discount info lives on the linked Quote row, not on
+// Shipment itself (see shipment.controller.js) — every place that renders
+// or emails invoice/shipment pricing needs to pull it the same way, or the
+// discount silently disappears from that one surface even though the price
+// itself was correctly calculated.
+function resolveAppliedDiscount(quote) {
+  if (!quote?.pricingMode || quote.pricingMode === "STANDARD") return null;
+  return {
+    type: quote.pricingMode,
+    label:
+      quote.pricingMode === "PROMO"
+        ? `Promo Code "${(quote.promoCode || "").toUpperCase()}"`
+        : "Enterprise Contract Rate",
+    // Despite the column name, promoDiscountKobo holds the discount amount
+    // for CONTRACT mode too — see quote.controller.js.
+    discountAmount: (quote.promoDiscountKobo || 0) / 100,
+  };
+}
+const QUOTE_DISCOUNT_SELECT = {
+  select: { pricingMode: true, promoCode: true, promoDiscountKobo: true },
+};
 
 async function uploadPDFAndGetSignedUrl(pdfBuffer, folder, filename) {
   // Upload to Cloudinary private folder
@@ -207,7 +233,7 @@ async function downloadInvoicePDF(req, res) {
           phone: true,
         },
       },
-      shipment: true,
+      shipment: { include: { quote: QUOTE_DISCOUNT_SELECT } },
     },
   });
 
@@ -226,6 +252,7 @@ async function downloadInvoicePDF(req, res) {
     shipment: payment.shipment,
     payment,
     surchargeBreakdown: getSurchargeBreakdown(payment.shipment),
+    appliedDiscount: resolveAppliedDiscount(payment.shipment?.quote),
   });
 
   await prisma.activityLog
@@ -286,7 +313,7 @@ async function emailInvoice(req, res) {
           phone: true,
         },
       },
-      shipment: true,
+      shipment: { include: { quote: QUOTE_DISCOUNT_SELECT } },
     },
   });
 
@@ -298,6 +325,7 @@ async function emailInvoice(req, res) {
   });
 
   const invoiceNumber = buildInvoiceNumber(payment);
+  const appliedDiscount = resolveAppliedDiscount(payment.shipment?.quote);
 
   const pdfBuffer = await generateInvoicePDF({
     invoice: { number: invoiceNumber, date: payment.createdAt },
@@ -305,6 +333,7 @@ async function emailInvoice(req, res) {
     shipment: payment.shipment,
     payment,
     surchargeBreakdown: getSurchargeBreakdown(payment.shipment),
+    appliedDiscount,
   });
 
   await sendInvoiceEmail({
@@ -313,6 +342,7 @@ async function emailInvoice(req, res) {
     invoiceNumber,
     amount: payment.amountKobo / 100,
     trackingNumber: payment.shipment?.trackingNumber,
+    appliedDiscount,
     pdfBuffer,
   });
 
@@ -619,10 +649,18 @@ async function adminListInvoices(req, res) {
 async function autoGenerateInvoice(shipment) {
   // Only run for paid shipments that have a linked payment
   const payment = await prisma.payment.findFirst({
-    where:   { shipmentId: shipment.id, status: 'PAID' },
-    orderBy: { createdAt: 'desc' },
+    where: { shipmentId: shipment.id, status: "PAID" },
+    orderBy: { createdAt: "desc" },
     include: {
-      user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+        },
+      },
     },
   });
   if (!payment) return; // unpaid or COD — skip
@@ -630,7 +668,7 @@ async function autoGenerateInvoice(shipment) {
   const invoiceNumber = buildInvoiceNumber(payment);
 
   const pdfBuffer = await generateInvoicePDF({
-    invoice:  { number: invoiceNumber, date: payment.createdAt },
+    invoice: { number: invoiceNumber, date: payment.createdAt },
     customer: payment.user,
     shipment,
     payment,
@@ -644,27 +682,30 @@ async function autoGenerateInvoice(shipment) {
       `invoice-${invoiceNumber}-delivered`,
     );
   } catch (e) {
-    console.error('[AutoInvoice] Cloudinary upload failed:', e.message);
+    console.error("[AutoInvoice] Cloudinary upload failed:", e.message);
   }
 
   // Email invoice to customer
   await sendInvoiceEmail({
-    to:            payment.user.email,
-    firstName:     payment.user.firstName,
+    to: payment.user.email,
+    firstName: payment.user.firstName,
     invoiceNumber: `INV-${invoiceNumber}`,
-    amount:        payment.amountKobo / 100,
+    amount: payment.amountKobo / 100,
     trackingNumber: shipment.trackingNumber,
     pdfBuffer,
   });
 
   // In-app notification
-  await prisma.notification.create({
-    data: {
-      userId: payment.userId,
-      type:   'PAYMENT',
-      title:  `Invoice Ready — ${shipment.trackingNumber}`,
-      body:   `Your invoice INV-${invoiceNumber} for ₦${(payment.amountKobo / 100).toLocaleString()} has been sent to your email.`,
-      data:   { shipmentId: shipment.id, invoiceNumber },
-    },
-  }).catch(() => {});
+  await prisma.notification
+    .create({
+      data: {
+        userId: payment.userId,
+        type: "PAYMENT",
+        title: `Invoice Ready — ${shipment.trackingNumber}`,
+        body: `Your invoice INV-${invoiceNumber} for ₦${(payment.amountKobo / 100).toLocaleString()} has been sent to your email.`,
+        data: { shipmentId: shipment.id, invoiceNumber },
+      },
+    })
+    .then((n) => notify(payment.userId, n))
+    .catch(() => {});
 }

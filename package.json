@@ -20,6 +20,8 @@
     "@prisma/client": "^6.19.3",
     "@upstash/qstash": "^2.11.1",
     "bcryptjs": "^3.0.3",
+    "web-push": "^3.6.7",
+    "resend": "^4.0.1",
     "cloudinary": "^1.41.3",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
