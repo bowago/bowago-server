@@ -106,12 +106,18 @@ async function getSettings(req, res) {
 
   // Merge in known defaults for keys that haven't been saved yet — important
   // on serverless (Vercel) where the boot-time seedDefaults() never runs.
-  const { DEFAULTS, TYPES, PRICE_ADJUSTMENT_GROUP, INSURANCE_GROUP } = require('../services/settings.service');
-  const relevantGroups = [PRICE_ADJUSTMENT_GROUP, INSURANCE_GROUP];
+  const { DEFAULTS, TYPES, PRICE_ADJUSTMENT_GROUP, INSURANCE_GROUP, CANCELLATION_GROUP, LOYALTY_GROUP } = require('../services/settings.service');
+  const relevantGroups = [PRICE_ADJUSTMENT_GROUP, INSURANCE_GROUP, CANCELLATION_GROUP, LOYALTY_GROUP];
   if (!group || relevantGroups.includes(group)) {
     for (const [key, value] of Object.entries(DEFAULTS)) {
       if (!settingsMap[key]) {
-        const keyGroup = key.startsWith('insurance.') ? INSURANCE_GROUP : PRICE_ADJUSTMENT_GROUP;
+        const keyGroup = key.startsWith('insurance.')
+          ? INSURANCE_GROUP
+          : key.startsWith('cancellation.')
+            ? CANCELLATION_GROUP
+            : key.startsWith('loyalty.')
+              ? LOYALTY_GROUP
+              : PRICE_ADJUSTMENT_GROUP;
         if (!group || group === keyGroup) {
           settingsMap[key] = { value, type: TYPES[key] || 'string', group: keyGroup };
         }

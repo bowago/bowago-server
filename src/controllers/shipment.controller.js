@@ -902,6 +902,7 @@ async function assignShipment(req, res) {
 // ─── CANCEL SHIPMENT ──────────────────────────────────────────────────────────
 // ─── CANCEL PREVIEW — step 1: returns calculated refund before confirming ─────
 async function cancelPreview(req, res) {
+  const { getNumberSetting } = require("../services/settings.service");
   const { id } = req.params;
   const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(req.user.role);
 
@@ -941,9 +942,18 @@ async function cancelPreview(req, res) {
 
   // Refund policy per the PRD refund-rules table (mirrors cancelShipment):
   // PENDING / BOOKED / AWAITING_PICKUP / CONFIRMED (paid) → 100% full refund
-  // PICKED_UP → 92% (warehouse fee deducted; PRD range 90–95%)
-  // FAILED    → 95% (full minus operator fee)
+  // PICKED_UP → fee % is configurable in Settings → Business Rules → Cancellation
+  //             (PRD range 5–10%; default 8%)
+  // FAILED    → fee % is configurable too (PRD: "full minus operator fee"; default 5%)
+  const pickedUpFeePercent = await getNumberSetting(
+    "cancellation.picked_up_fee_percent",
+  );
+  const failedDeliveryFeePercent = await getNumberSetting(
+    "cancellation.failed_delivery_fee_percent",
+  );
+
   let refundPercent = 0;
+  let feePercent = 0;
   let refundReason = "";
   if (!payment || paidAmount === 0) {
     refundPercent = 0;
@@ -956,15 +966,17 @@ async function cancelPreview(req, res) {
     refundPercent = 100;
     refundReason = "Full refund — shipment paid but not yet picked up";
   } else if (shipment.status === "PICKED_UP") {
-    refundPercent = 92;
-    refundReason =
-      "Partial refund (92%) — package already picked up; warehouse fee deducted";
+    feePercent = Math.min(100, Math.max(0, pickedUpFeePercent));
+    refundPercent = 100 - feePercent;
+    refundReason = `Partial refund (${refundPercent}%) — package already picked up; ${feePercent}% warehouse fee retained and not refunded`;
   } else if (shipment.status === "FAILED") {
-    refundPercent = 95;
-    refundReason = "Refund minus operator fee — delivery failed";
+    feePercent = Math.min(100, Math.max(0, failedDeliveryFeePercent));
+    refundPercent = 100 - feePercent;
+    refundReason = `Refund minus operator fee — ${feePercent}% retained and not refunded (delivery failed)`;
   }
 
   const refundAmount = Math.floor(paidAmount * (refundPercent / 100));
+  const amountRetained = paidAmount - refundAmount;
 
   return success(
     res,
@@ -974,11 +986,16 @@ async function cancelPreview(req, res) {
       paidAmount,
       refundAmount,
       refundPercent,
+      feePercent,
+      amountRetained,
       refundType:
         refundPercent === 100 ? "FULL" : refundPercent > 0 ? "PARTIAL" : "NONE",
       refundReason,
       currency: "NGN",
-      note: "Refund processed via Paystack. Est. 3–5 business days.",
+      note:
+        amountRetained > 0
+          ? `Refund processed via Paystack. Est. 3–5 business days. ₦${amountRetained.toLocaleString()} will be retained and NOT refunded.`
+          : "Refund processed via Paystack. Est. 3–5 business days.",
     },
     "Refund preview calculated",
   );
@@ -1030,8 +1047,11 @@ async function cancelShipment(req, res) {
   const payment = shipment.payments?.[0] || null;
   const paidAmount = payment ? payment.amountKobo / 100 : 0;
 
-  // ── PRD refund % by status ────────────────────────────────────────────────────
+  // ── PRD refund % by status — fee % configurable in Settings → Business
+  // Rules → Cancellation & Returns (must match cancelPreview above) ──────────
+  const { getNumberSetting } = require("../services/settings.service");
   let refundPercent = 0;
+  let feePercent = 0;
   if (payment && paidAmount > 0) {
     if (
       ["PENDING", "BOOKED", "AWAITING_PICKUP", "CONFIRMED"].includes(
@@ -1040,12 +1060,21 @@ async function cancelShipment(req, res) {
     ) {
       refundPercent = 100;
     } else if (shipment.status === "PICKED_UP") {
-      refundPercent = 92; // PRD: 90-95%; 92% midpoint (deduct warehouse fee)
+      const pickedUpFeePercent = await getNumberSetting(
+        "cancellation.picked_up_fee_percent",
+      );
+      feePercent = Math.min(100, Math.max(0, pickedUpFeePercent));
+      refundPercent = 100 - feePercent;
     } else if (shipment.status === "FAILED") {
-      refundPercent = 95; // PRD: full minus operator fee
+      const failedDeliveryFeePercent = await getNumberSetting(
+        "cancellation.failed_delivery_fee_percent",
+      );
+      feePercent = Math.min(100, Math.max(0, failedDeliveryFeePercent));
+      refundPercent = 100 - feePercent;
     }
   }
   const refundAmount = Math.floor(paidAmount * (refundPercent / 100));
+  const amountRetained = paidAmount - refundAmount;
 
   // ── Cancel the shipment ───────────────────────────────────────────────────────
   await prisma.$transaction([
@@ -1088,7 +1117,9 @@ async function cancelShipment(req, res) {
         title: `Shipment ${shipment.trackingNumber} Cancelled`,
         body:
           refundAmount > 0
-            ? `Your shipment has been cancelled. A refund of ₦${refundAmount.toLocaleString()} (${refundPercent}%) has been initiated and will reflect in 3-5 business days.`
+            ? amountRetained > 0
+              ? `Your shipment has been cancelled. A refund of ₦${refundAmount.toLocaleString()} (${refundPercent}%) has been initiated and will reflect in 3-5 business days. ₦${amountRetained.toLocaleString()} (${feePercent}%) has been retained as a non-refundable fee.`
+              : `Your shipment has been cancelled. A refund of ₦${refundAmount.toLocaleString()} (${refundPercent}%) has been initiated and will reflect in 3-5 business days.`
             : `Your shipment has been cancelled. No refund is applicable.`,
         data: {
           shipmentId: id,
@@ -1105,6 +1136,8 @@ async function cancelShipment(req, res) {
       cancelled: true,
       refundAmount,
       refundPercent,
+      feePercent,
+      amountRetained,
       refundInitiated: !!refundResult,
       currency: "NGN",
     },

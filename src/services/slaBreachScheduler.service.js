@@ -4,6 +4,7 @@
 // then writes a DelayAlert row so the same shipment isn't alerted again.
 const { prisma } = require('../config/db');
 const { sendShipmentStatusEmail } = require('../config/email');
+const { notifyAdmins } = require('./notify.service');
 
 async function runSLABreachSweep() {
   const now = new Date();
@@ -72,6 +73,21 @@ async function runSLABreachSweep() {
         shipment.customer.firstName,
         { ...shipment, status: 'DELAY_ALERT' },
       ).catch(() => {});
+
+      // Flag for admin — this is the part the header comment already promised
+      // but never actually did; only the customer was ever notified before.
+      await notifyAdmins({
+        type: 'DELAY_ALERT',
+        title: `SLA Breach — ${shipment.trackingNumber}`,
+        body: `${reason} Customer has been notified. Consider proactive outreach.`,
+        data: {
+          shipmentId: shipment.id,
+          trackingNumber: shipment.trackingNumber,
+          estimatedDelivery: shipment.estimatedDelivery,
+          daysLate,
+        },
+        capability: 'canManageShipments',
+      }).catch(() => {});
 
       alerted++;
     } catch (err) {

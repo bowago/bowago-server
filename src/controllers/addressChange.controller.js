@@ -8,7 +8,7 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 const { sendEmail } = require("../config/email");
-const { notify } = require("../services/notify.service");
+const { notify, notifyAdmins } = require("../services/notify.service");
 
 // ─── Customer: Request address change ────────────────────────────────────────
 async function requestAddressChange(req, res) {
@@ -75,7 +75,7 @@ async function requestAddressChange(req, res) {
     data: { status: "PENDING_ADMIN_REVIEW" },
   });
 
-  // Notify admins
+  // Confirmation notification back to the customer who submitted it.
   const submittedNotification = await prisma.notification.create({
     data: {
       userId: req.user.id,
@@ -86,6 +86,16 @@ async function requestAddressChange(req, res) {
     },
   });
   notify(req.user.id, submittedNotification);
+
+  // Notify admins — this shipment is now sitting in PENDING_ADMIN_REVIEW and
+  // needs someone with shipment-management capability to act on it.
+  await notifyAdmins({
+    type: "SHIPMENT_UPDATE",
+    title: `Address Change Pending Review — ${shipment.trackingNumber}`,
+    body: `A customer requested an address change for ${shipment.trackingNumber} (reason: ${reason || "not provided"}). Review and approve or reject.`,
+    data: { shipmentId, changeRequestId: changeReq.id },
+    capability: "canManageShipments",
+  });
 
   return created(
     res,

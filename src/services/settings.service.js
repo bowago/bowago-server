@@ -7,6 +7,7 @@ const { prisma } = require('../config/db');
 const PRICE_ADJUSTMENT_GROUP = 'price_adjustment';
 const INSURANCE_GROUP = 'insurance';
 const LOYALTY_GROUP = 'loyalty';
+const CANCELLATION_GROUP = 'cancellation';
 
 const DEFAULTS = {
   // ── Price Adjustment ───────────────────────────────────────────────────────
@@ -19,6 +20,13 @@ const DEFAULTS = {
   // ── Insurance ─────────────────────────────────────────────────────────────
   'insurance.rate_percent': '2.5',
   'insurance.min_premium_naira': '100',
+
+  // ── Cancellation & Returns ───────────────────────────────────────────────
+  // % of the paid amount RETAINED (not refunded) by BowaGO when a shipment
+  // is cancelled after it has already reached these stages. PRD range for
+  // PICKED_UP is 5-10% (warehouse fee); default sits at the 8% midpoint.
+  'cancellation.picked_up_fee_percent': '8',
+  'cancellation.failed_delivery_fee_percent': '5',
 
   // ── Loyalty ───────────────────────────────────────────────────────────────
   // Points earned per ₦100 of shipment final price (after discounts/promo).
@@ -47,6 +55,8 @@ const TYPES = {
   'price_adjustment.sweep_interval_minutes': 'number',
   'insurance.rate_percent': 'number',
   'insurance.min_premium_naira': 'number',
+  'cancellation.picked_up_fee_percent': 'number',
+  'cancellation.failed_delivery_fee_percent': 'number',
   'loyalty.earn_rate_per_100_naira': 'number',
   'loyalty.min_redeem_points': 'number',
   'loyalty.point_naira_value': 'number',
@@ -79,14 +89,21 @@ async function getBoolSetting(key) {
 }
 
 // Ensures every default key exists as a row so it shows up in
-// GET /admin/settings?group=price_adjustment even before anyone edits it.
+// GET /admin/settings?group=<group> even before anyone edits it.
+function groupForKey(key) {
+  if (key.startsWith('insurance.')) return INSURANCE_GROUP;
+  if (key.startsWith('cancellation.')) return CANCELLATION_GROUP;
+  if (key.startsWith('loyalty.')) return LOYALTY_GROUP;
+  return PRICE_ADJUSTMENT_GROUP;
+}
+
 async function seedDefaults() {
   await Promise.all(
     Object.entries(DEFAULTS).map(([key, value]) =>
       prisma.appSettings.upsert({
         where: { key },
         update: {},
-        create: { key, value, type: TYPES[key] || 'string', group: PRICE_ADJUSTMENT_GROUP },
+        create: { key, value, type: TYPES[key] || 'string', group: groupForKey(key) },
       }),
     ),
   );
@@ -96,6 +113,7 @@ module.exports = {
   PRICE_ADJUSTMENT_GROUP,
   INSURANCE_GROUP,
   LOYALTY_GROUP,
+  CANCELLATION_GROUP,
   DEFAULTS,
   TYPES,
   getSettingValue,

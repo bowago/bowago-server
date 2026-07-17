@@ -7,7 +7,7 @@ const {
   getPagination,
   buildMeta,
 } = require("../utils/helpers");
-const { notify } = require("../services/notify.service");
+const { notify, notifyAdmins } = require("../services/notify.service");
 
 // ─── Customer: File a claim ───────────────────────────────────────────────────
 async function fileClaim(req, res) {
@@ -148,6 +148,15 @@ async function fileClaim(req, res) {
     },
   });
   notify(req.user.id, claimSubmittedNotification);
+
+  // Notify admins — a new claim needs review by staff with claims capability.
+  await notifyAdmins({
+    type: "SYSTEM",
+    title: `New Claim Filed — ${shipment.trackingNumber}`,
+    body: `A ${type?.toLowerCase?.() || ""} claim of ₦${claimAmountNum.toLocaleString()} was filed for shipment ${shipment.trackingNumber}. Review it within 3-5 business days.`,
+    data: { claimId: claim.id, shipmentId },
+    capability: "canManageClaims",
+  });
 
   return created(res, { claim }, "Claim submitted successfully");
 }
