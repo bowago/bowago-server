@@ -174,4 +174,81 @@ router.post('/register', authenticate, orgController.registerOrganization);
  */
 router.get('/status', authenticate, orgController.getOrganizationStatus);
 
+/**
+ * @swagger
+ * /organization/members:
+ *   get:
+ *     summary: List my company's actual team roster (ROLE_MASTER)
+ *     tags: [Organization]
+ *     description: >
+ *       Unlike /organization/invites (invite history), this returns the live
+ *       User rows currently in the tenant — id, name, enterpriseRole,
+ *       isActive — so a Master can see and manage who is actually in the
+ *       company today. Internal SUPER_ADMIN/LOGISTICS_MANAGER may pass
+ *       ?masterId= to inspect a specific tenant for support.
+ *     parameters:
+ *       - in: query
+ *         name: masterId
+ *         schema: { type: string, format: uuid }
+ *         description: Required for internal staff; ignored for a Master (uses their own tenant).
+ *     responses:
+ *       200: { description: Team roster returned }
+ *       403: { description: Not a Master or internal staff }
+ */
+router.get('/members', authenticate, orgController.listTeamMembers);
+
+/**
+ * @swagger
+ * /organization/members/{id}/role:
+ *   patch:
+ *     summary: Change a team member's role (ROLE_MASTER)
+ *     tags: [Organization]
+ *     description: >
+ *       Updates an existing team member's enterpriseRole. Cannot be used on
+ *       the company owner. The target must already belong to your company.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [role]
+ *             properties:
+ *               role:
+ *                 type: string
+ *                 enum: [ROLE_MASTER, ROLE_DISPATCHER, ROLE_FINANCE, ROLE_AGENT, ROLE_USER]
+ *     responses:
+ *       200: { description: Role updated }
+ *       403: { description: Only the company Master can do this }
+ *       404: { description: Team member not found in your company }
+ */
+router.patch('/members/:id/role', authenticate, orgController.updateMemberRole);
+
+/**
+ * @swagger
+ * /organization/members/{id}/status:
+ *   patch:
+ *     summary: Remove or reactivate a team member (ROLE_MASTER)
+ *     tags: [Organization]
+ *     description: >
+ *       Toggles isActive on a team member's account — the company owner's
+ *       way to revoke (and later restore) a teammate's access. Reversible;
+ *       does not delete their history.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Status toggled }
+ *       403: { description: Only the company Master can do this }
+ *       404: { description: Team member not found in your company }
+ */
+router.patch('/members/:id/status', authenticate, orgController.toggleMemberStatus);
+
 module.exports = router;

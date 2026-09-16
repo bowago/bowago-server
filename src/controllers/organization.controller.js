@@ -11,6 +11,7 @@
 const crypto = require("crypto");
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
+const { getOrgMasterId, getOrgMemberIds } = require("../utils/access");
 const {
   success,
   created,
@@ -18,6 +19,23 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 const { sendInviteEmail } = require("../config/email");
+
+// Internal staff who may act on behalf of ANY tenant (not just their own,
+// unlike a ROLE_MASTER): SUPER_ADMIN/LOGISTICS_MANAGER always qualify; a
+// ROLE_ADMIN qualifies only if explicitly granted the "canManageOrganization"
+// capability (see adminRole.controller.js — that capability was previously
+// described and toggleable in the Super Admin's role UI but never actually
+// checked anywhere, so granting it had zero effect. This is that check).
+const SUPER_COMPAT = ["SUPER_ADMIN", "LOGISTICS_MANAGER"];
+async function isInternalOrgManager(user) {
+  if (user.role !== "ADMIN") return false;
+  if (SUPER_COMPAT.includes(user.adminSubRole)) return true;
+  if (user.adminSubRole !== "ROLE_ADMIN") return false;
+  const perm = await prisma.adminRolePermission.findUnique({
+    where: { userId: user.id },
+  });
+  return !!(perm && perm.canManageOrganization);
+}
 
 const INVITE_EXPIRY_DAYS = 7;
 const ALLOWED_INVITE_ROLES = [
@@ -45,10 +63,7 @@ async function inviteMember(req, res) {
   // Only the tenant's ROLE_MASTER, or internal platform staff assisting with
   // onboarding, can send Enterprise invites.
   const inviter = req.user;
-  const isInternalStaff =
-    inviter.role === "ADMIN" &&
-    (inviter.adminSubRole === "SUPER_ADMIN" ||
-      inviter.adminSubRole === "LOGISTICS_MANAGER");
+  const isInternalStaff = await isInternalOrgManager(inviter);
   const isOrgMaster =
     inviter.role === "ENTERPRISE" && inviter.enterpriseRole === "ROLE_MASTER";
 
@@ -76,9 +91,13 @@ async function inviteMember(req, res) {
   );
 
   // Invites sent by internal staff on behalf of a tenant still need to be
-  // scoped to that tenant's masterId — an org master invites under their own
-  // id, and internal staff must pass masterId explicitly in the body.
-  const masterId = isOrgMaster ? inviter.id : req.body.masterId || null;
+  // scoped to that tenant's masterId — an org master invites under their
+  // tenant's true root (getOrgMasterId resolves this even for a co-owner
+  // ROLE_MASTER who was themselves invited by the original owner, so a
+  // multi-master org stays a single flat tenant instead of forking every
+  // time one master invites someone), and internal staff must pass
+  // masterId explicitly in the body.
+  const masterId = isOrgMaster ? getOrgMasterId(inviter) : req.body.masterId || null;
   if (isInternalStaff && !masterId) {
     throw new ApiError(
       400,
@@ -222,13 +241,19 @@ async function listInvites(req, res) {
     ...(status && { status }),
   };
 
-  // ROLE_MASTER can only see invites they sent; internal SUPER_ADMIN/LOGISTICS_MANAGER see all
-  const isInternalStaff =
-    req.user.role === "ADMIN" &&
-    (req.user.adminSubRole === "SUPER_ADMIN" ||
-      req.user.adminSubRole === "LOGISTICS_MANAGER");
+  // A master (root owner or an invited co-owner) sees their whole company's
+  // invite history — invitedBy is always stamped with the tenant's resolved
+  // root (see inviteMember), so a co-owner must look up that same root
+  // rather than filtering on their own id. Internal SUPER_ADMIN/
+  // LOGISTICS_MANAGER, or a ROLE_ADMIN granted canManageOrganization, see
+  // everything, across every tenant.
+  const isInternalStaff = await isInternalOrgManager(req.user);
   if (!isInternalStaff) {
-    where.invitedBy = req.user.id;
+    const orgMasterId = getOrgMasterId(req.user);
+    if (!orgMasterId) {
+      throw new ApiError(403, "Only your company's Master user or Super Admins can view invites");
+    }
+    where.invitedBy = orgMasterId;
   }
 
   const [invites, total] = await Promise.all([
@@ -258,13 +283,13 @@ async function cancelInvite(req, res) {
   const invite = await prisma.orgInvite.findUnique({ where: { id } });
   if (!invite) throw new ApiError(404, "Invite not found");
 
-  // Org master can only act on invites they sent; internal staff can act on any
-  const isInternalStaff =
-    req.user.role === "ADMIN" &&
-    (req.user.adminSubRole === "SUPER_ADMIN" ||
-      req.user.adminSubRole === "LOGISTICS_MANAGER");
-  if (!isInternalStaff && invite.invitedBy !== req.user.id) {
-    throw new ApiError(403, "You can only manage invites you sent");
+  // A master (root or co-owner) can act on any invite for their company —
+  // invitedBy is stamped with the tenant's resolved root, so compare against
+  // that, not the caller's own id. Internal staff (including a ROLE_ADMIN
+  // granted canManageOrganization) can act on any tenant's.
+  const isInternalStaff = await isInternalOrgManager(req.user);
+  if (!isInternalStaff && invite.invitedBy !== getOrgMasterId(req.user)) {
+    throw new ApiError(403, "You can only manage invites for your own company");
   }
 
   if (invite.status === "PENDING") {
@@ -308,14 +333,13 @@ async function resendInvite(req, res) {
     throw new ApiError(400, "This invite has already been accepted");
   }
 
-  // Same isolation rule as cancelInvite (this check was missing here): an org
-  // master may only resend invites they sent; internal staff may resend any.
-  const isInternalStaff =
-    req.user.role === "ADMIN" &&
-    (req.user.adminSubRole === "SUPER_ADMIN" ||
-      req.user.adminSubRole === "LOGISTICS_MANAGER");
-  if (!isInternalStaff && invite.invitedBy !== req.user.id) {
-    throw new ApiError(403, "You can only resend invites you sent");
+  // Same isolation rule as cancelInvite: a master (root or co-owner) may
+  // resend any invite for their own company — compare against the tenant's
+  // resolved root, not the caller's own id — internal staff (including a
+  // ROLE_ADMIN granted canManageOrganization) may resend any.
+  const isInternalStaff = await isInternalOrgManager(req.user);
+  if (!isInternalStaff && invite.invitedBy !== getOrgMasterId(req.user)) {
+    throw new ApiError(403, "You can only manage invites for your own company");
   }
 
   const token = crypto.randomBytes(32).toString("hex");
@@ -498,6 +522,7 @@ async function getOrganizationStatus(req, res) {
       id: true,
       role: true,
       enterpriseRole: true,
+      masterId: true,
       companyName: true,
       industry: true,
       companyEmail: true,
@@ -514,11 +539,13 @@ async function getOrganizationStatus(req, res) {
   const isBusiness =
     user.role === "ENTERPRISE" && user.enterpriseRole === "ROLE_MASTER";
 
-  // Count team members invited by this user
+  // Live count of everyone actually in the tenant (root + team members),
+  // not a count of invite rows this exact user happened to send — a
+  // co-owner ROLE_MASTER should see the same total as the original owner.
+  // Excludes the master themselves from "team" count (root + N members,
+  // minus 1 for the root).
   const teamCount = isBusiness
-    ? await prisma.orgInvite.count({
-        where: { invitedBy: req.user.id, status: "ACCEPTED" },
-      })
+    ? Math.max(0, ((await getOrgMemberIds(user)) || []).length - 1)
     : 0;
 
   return success(res, {
@@ -545,6 +572,155 @@ async function getOrganizationStatus(req, res) {
   });
 }
 
+// ─── GET /organization/members ─────────────────────────────────────────────
+// The actual current team roster (live User rows) — as opposed to
+// listInvites, which only shows invite history. This is what a ROLE_MASTER
+// needs to see who is currently active in their company and what role each
+// person holds, which nothing previously exposed.
+async function listTeamMembers(req, res) {
+  const isInternalStaff = await isInternalOrgManager(req.user);
+
+  let masterId;
+  if (isInternalStaff) {
+    masterId = req.query.masterId;
+    if (!masterId) {
+      throw new ApiError(
+        400,
+        "masterId query param is required for internal staff",
+      );
+    }
+  } else {
+    masterId = getOrgMasterId(req.user);
+    if (!masterId) {
+      throw new ApiError(
+        403,
+        "Only your company's Master user or Super Admins can view the team roster",
+      );
+    }
+  }
+
+  const members = await prisma.user.findMany({
+    where: { OR: [{ id: masterId }, { masterId }] },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      enterpriseRole: true,
+      isActive: true,
+      createdAt: true,
+    },
+    orderBy: [{ enterpriseRole: "asc" }, { createdAt: "asc" }],
+  });
+
+  return success(res, { members });
+}
+
+// ─── PATCH /organization/members/:id/role ──────────────────────────────────
+// A ROLE_MASTER changes a teammate's enterpriseRole after they've already
+// joined — the piece that was missing: previously the only lever a master
+// had was inviteMember, which only sets the role once at invite time.
+async function updateMemberRole(req, res) {
+  const { id } = req.params;
+  const { role } = req.body;
+
+  if (req.user.role !== "ENTERPRISE" || req.user.enterpriseRole !== "ROLE_MASTER") {
+    throw new ApiError(403, "Only your company's Master user can manage team members");
+  }
+  if (!ALLOWED_INVITE_ROLES.includes(role)) {
+    throw new ApiError(
+      400,
+      `Invalid role. Must be one of: ${ALLOWED_INVITE_ROLES.join(", ")}`,
+    );
+  }
+
+  const masterId = getOrgMasterId(req.user);
+  if (id === masterId) {
+    throw new ApiError(400, "Cannot change the company owner's role here");
+  }
+
+  const target = await prisma.user.findUnique({ where: { id } });
+  if (!target || target.role !== "ENTERPRISE" || target.masterId !== masterId) {
+    throw new ApiError(404, "Team member not found");
+  }
+
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { enterpriseRole: role },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      enterpriseRole: true,
+    },
+  });
+
+  await prisma.activityLog
+    .create({
+      data: {
+        userId: req.user.id,
+        action: "UPDATE_TEAM_MEMBER_ROLE",
+        resource: "User",
+        resourceId: id,
+        metadata: { newRole: role },
+      },
+    })
+    .catch(() => {});
+
+  return success(res, { user: updated }, "Team member role updated");
+}
+
+// ─── PATCH /organization/members/:id/status ────────────────────────────────
+// A ROLE_MASTER's way to "remove" a team member — soft (isActive toggle,
+// same mechanism used platform-wide by requireUserManagement's
+// toggleUserStatus), so it's reversible and doesn't destroy their history.
+// Previously the only account status lever was /users/:id/status, which is
+// internal-ADMIN-only — a company owner had no way to do this themselves.
+async function toggleMemberStatus(req, res) {
+  const { id } = req.params;
+
+  if (req.user.role !== "ENTERPRISE" || req.user.enterpriseRole !== "ROLE_MASTER") {
+    throw new ApiError(403, "Only your company's Master user can manage team members");
+  }
+
+  const masterId = getOrgMasterId(req.user);
+  if (id === masterId) {
+    throw new ApiError(400, "Cannot change your own access here");
+  }
+
+  const target = await prisma.user.findUnique({ where: { id } });
+  if (!target || target.role !== "ENTERPRISE" || target.masterId !== masterId) {
+    throw new ApiError(404, "Team member not found");
+  }
+
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { isActive: !target.isActive },
+    select: { id: true, email: true, isActive: true },
+  });
+
+  await prisma.activityLog
+    .create({
+      data: {
+        userId: req.user.id,
+        action: updated.isActive
+          ? "REACTIVATE_TEAM_MEMBER"
+          : "REMOVE_TEAM_MEMBER",
+        resource: "User",
+        resourceId: id,
+      },
+    })
+    .catch(() => {});
+
+  return success(
+    res,
+    { user: updated },
+    `Team member ${updated.isActive ? "reactivated" : "removed"}`,
+  );
+}
+
 module.exports = {
   inviteMember,
   acceptInvite,
@@ -553,4 +729,7 @@ module.exports = {
   resendInvite,
   registerOrganization,
   getOrganizationStatus,
+  listTeamMembers,
+  updateMemberRole,
+  toggleMemberStatus,
 };

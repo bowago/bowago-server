@@ -32,13 +32,20 @@ const { ApiError } = require("./ApiError");
 
 /**
  * Resolve the org master id for an Enterprise user.
- * ROLE_MASTER users are their own master; team members carry masterId.
+ * The ORIGINAL owner (never invited by anyone — masterId is null) is the
+ * tenant root, whether or not their enterpriseRole is ROLE_MASTER. Everyone
+ * else — including a co-owner who holds enterpriseRole ROLE_MASTER but was
+ * themselves invited by the original owner — defers to whatever their own
+ * masterId already points at, so a multi-master org still resolves to one
+ * flat root instead of forking into sub-trees.
  * Returns null for non-Enterprise users or unlinked accounts.
  */
 function getOrgMasterId(user) {
   if (!user || user.role !== "ENTERPRISE") return null;
-  if (user.enterpriseRole === "ROLE_MASTER") return user.id;
-  return user.masterId || null;
+  if (!user.masterId) {
+    return user.enterpriseRole === "ROLE_MASTER" ? user.id : null;
+  }
+  return user.masterId;
 }
 
 /**

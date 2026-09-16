@@ -8,6 +8,7 @@ const {
   requireShipmentOpsManagement,
   requireShipmentDispatchAccess,
   requireEnterprise,
+  restrictEnterpriseRolesTo,
 } = require("../middleware/auth");
 const {
   downloadShippingLabel,
@@ -188,7 +189,16 @@ router.use(authenticate);
  *       401:
  *         description: Unauthorized
  */
-router.post("/", shipmentController.createShipment);
+router.post(
+  "/",
+  // Enterprise: only Master/Dispatcher/User book shipments (matches the
+  // frontend's own "Get Quote" sidebar gating and the ROLE_AGENT/
+  // ROLE_FINANCE job descriptions, which never include this). Customers and
+  // internal Admins are unaffected — restrictEnterpriseRolesTo only applies
+  // to Enterprise-role callers.
+  restrictEnterpriseRolesTo("ROLE_MASTER", "ROLE_DISPATCHER", "ROLE_USER"),
+  shipmentController.createShipment,
+);
 
 /**
  * @swagger

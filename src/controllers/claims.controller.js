@@ -1,6 +1,6 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
-const { assertOwnedResourceAccess } = require("../utils/access");
+const { assertOwnedResourceAccess, getOrgMemberIds } = require("../utils/access");
 const {
   success,
   created,
@@ -8,6 +8,26 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 const { notify, notifyAdmins } = require("../services/notify.service");
+
+// Enterprise tenant roles that may see the WHOLE company's claims, not just
+// their own — ROLE_MASTER (owner oversight) and ROLE_FINANCE (claims involve
+// payouts). Mirrors ENTERPRISE_FINANCE_ROLES in invoice.controller.js and
+// ENTERPRISE_TICKET_ROLES in support.controller.js. ROLE_DISPATCHER/
+// ROLE_AGENT/ROLE_USER still see only their own.
+const ENTERPRISE_CLAIM_ROLES = ["ROLE_MASTER", "ROLE_FINANCE"];
+
+// Resolve the userId filter for "my claims": personal for everyone except
+// Enterprise Master/Finance, who get their whole company's claims.
+async function resolveClaimOwnerFilter(user) {
+  if (
+    user.role === "ENTERPRISE" &&
+    ENTERPRISE_CLAIM_ROLES.includes(user.enterpriseRole)
+  ) {
+    const memberIds = await getOrgMemberIds(user);
+    if (memberIds && memberIds.length > 0) return { in: memberIds };
+  }
+  return user.id;
+}
 
 // ─── Customer: File a claim ───────────────────────────────────────────────────
 async function fileClaim(req, res) {
@@ -162,13 +182,21 @@ async function fileClaim(req, res) {
 }
 
 // ─── Customer: My claims ──────────────────────────────────────────────────────
+// Also serves as the company-wide view for Enterprise ROLE_MASTER /
+// ROLE_FINANCE (see resolveClaimOwnerFilter above).
 async function myClaims(req, res) {
   const claims = await prisma.claim.findMany({
-    where: { userId: req.user.id },
+    where: { userId: await resolveClaimOwnerFilter(req.user) },
     orderBy: { createdAt: "desc" },
     include: {
       images: true,
       shipment: { select: { trackingNumber: true, recipientCity: true } },
+      // Needed once this can return teammates' claims too, so the viewer
+      // can tell whose claim each row is — same shape listClaims already
+      // returns for the internal admin view.
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true },
+      },
     },
   });
   return success(res, { claims });

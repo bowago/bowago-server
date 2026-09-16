@@ -221,6 +221,25 @@ function requireEnterprise(req, res, next) {
   next();
 }
 
+// Wraps requireEnterpriseRole so it only applies to callers who ARE
+// Enterprise tenant users — everyone else (CUSTOMER, internal ADMIN) passes
+// through unrestricted. This lets a route stay open to individual customers
+// and internal staff while still restricting WHICH Enterprise sub-roles may
+// use it — using the same requireEnterpriseRole already defined above,
+// which was previously never wired into any route. Enterprise sub-role
+// permissions had otherwise only ever been enforced by the frontend hiding
+// buttons/menu items; any authenticated Enterprise user of any sub-role
+// could still call the underlying API directly.
+//
+//   router.post('/', restrictEnterpriseRolesTo('ROLE_MASTER', 'ROLE_DISPATCHER', 'ROLE_USER'), createShipment)
+function restrictEnterpriseRolesTo(...enterpriseRoles) {
+  const gate = requireEnterpriseRole(...enterpriseRoles);
+  return (req, res, next) => {
+    if (req.user.role !== "ENTERPRISE") return next();
+    return gate(req, res, next);
+  };
+}
+
 // ─── Gap 5: 2FA session guard for sensitive routes (e.g. Invoices) ───────────
 //
 // Usage:  router.use(authenticate, requireRecentMFA());
@@ -342,5 +361,6 @@ module.exports = {
   requireShipmentDispatchAccess,
   requireEnterprise,
   requireEnterpriseRole,
+  restrictEnterpriseRolesTo,
   optionalAuth,
 };

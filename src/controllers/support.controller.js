@@ -2,13 +2,37 @@ const { prisma } = require("../config/db");
 const socketService = require("../services/socket.service");
 const { notify } = require("../services/notify.service");
 const { ApiError } = require("../utils/ApiError");
-const { assertOwnedResourceAccess } = require("../utils/access");
+const { assertOwnedResourceAccess, getOrgMemberIds } = require("../utils/access");
 const {
   success,
   created,
   getPagination,
   buildMeta,
 } = require("../utils/helpers");
+
+// Enterprise tenant roles that may see the WHOLE company's support tickets,
+// not just their own. ROLE_MASTER (owner oversight) and ROLE_AGENT — the
+// role literally defined as "Company CS rep: customer-related workflows
+// only" (see prisma/schema.prisma EnterpriseRole) — need this to do their
+// job at all; ROLE_DISPATCHER/ROLE_FINANCE/ROLE_USER still see only their
+// own, same as before. Mirrors ENTERPRISE_FINANCE_ROLES in
+// invoice.controller.js.
+const ENTERPRISE_TICKET_ROLES = ["ROLE_MASTER", "ROLE_AGENT"];
+
+// Resolve the customerId filter for "my tickets": personal for everyone
+// except Enterprise Master/Agent, who get their whole company's tickets so
+// ROLE_AGENT can actually do customer-service work and ROLE_MASTER can see
+// what their team is dealing with.
+async function resolveTicketOwnerFilter(user) {
+  if (
+    user.role === "ENTERPRISE" &&
+    ENTERPRISE_TICKET_ROLES.includes(user.enterpriseRole)
+  ) {
+    const memberIds = await getOrgMemberIds(user);
+    if (memberIds && memberIds.length > 0) return { in: memberIds };
+  }
+  return user.id;
+}
 
 async function autoAssignTicket(category) {
   const categoryCapabilityMap = {
@@ -113,12 +137,14 @@ async function createTicket(req, res) {
 }
 
 // ─── Customer: My tickets ─────────────────────────────────────────────────────
+// Also serves as the company-wide view for Enterprise ROLE_MASTER / ROLE_AGENT
+// (see resolveTicketOwnerFilter above) — same endpoint, wider `where` filter.
 async function myTickets(req, res) {
   const { page, limit, skip } = getPagination(req.query);
   const { status } = req.query;
 
   const where = {
-    customerId: req.user.id,
+    customerId: await resolveTicketOwnerFilter(req.user),
     ...(status && { status }),
   };
 
@@ -132,6 +158,12 @@ async function myTickets(req, res) {
         messages: { orderBy: { createdAt: "desc" }, take: 1 },
         assignedTo: { select: { firstName: true, lastName: true } },
         shipment: { select: { trackingNumber: true } },
+        // Needed so a company-wide view (ROLE_MASTER/ROLE_AGENT) can tell
+        // whose ticket each row is — matches listTickets' shape below so
+        // the same frontend table renders correctly either way.
+        customer: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
       },
     }),
     prisma.supportTicket.count({ where }),
@@ -139,6 +171,10 @@ async function myTickets(req, res) {
 
   const flattened = tickets.map((t) => ({
     ...t,
+    username: t.customer
+      ? `${t.customer.firstName} ${t.customer.lastName}`.trim()
+      : undefined,
+    email: t.customer?.email,
     trackingNumber: t.shipment?.trackingNumber ?? null,
   }));
 
