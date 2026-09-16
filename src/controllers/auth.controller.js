@@ -29,7 +29,7 @@ function maskPhone(phone) {
 
 // ─── REGISTER ─────────────────────────────────────────────────────────────────
 async function register(req, res) {
-  const { email, password, firstName, lastName, phone } = req.body;
+  const { email, password, firstName, lastName, phone, businessName } = req.body;
 
   const exists = await prisma.user.findUnique({ where: { email } });
   if (exists) throw new ApiError(409, "Email already registered");
@@ -48,6 +48,10 @@ async function register(req, res) {
       firstName,
       lastName,
       phone,
+      // Optional "Business Name" field on the signup form maps onto the
+      // same companyName field the Settings → Company Info tab reads
+      // from/writes to (see prisma/schema.prisma User model).
+      ...(businessName ? { companyName: businessName } : {}),
       authProvider: "EMAIL",
     },
   });

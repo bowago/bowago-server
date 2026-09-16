@@ -28,6 +28,7 @@ const registerSchema = Joi.object({
   firstName: Joi.string().min(1).max(50).trim().required(),
   lastName: Joi.string().min(1).max(50).trim().required(),
   phone: Joi.string().pattern(/^\+?[0-9]{10,15}$/).optional(),
+  businessName: Joi.string().max(150).trim().optional().allow(''),
 }).custom(passwordNotContainingEmail('password'));
 
 const loginSchema = Joi.object({
