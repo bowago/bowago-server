@@ -245,6 +245,7 @@ async function sendShipmentStatusEmail(email, firstName, shipment) {
 
     <table class="details-table">
       <tr><td>Status</td><td>${label}</td></tr>
+      ${shipment.shipmentMode ? `<tr><td>Mode of Shipment</td><td>${{ AIR: "Air", LAND: "Land", SEA: "Sea" }[shipment.shipmentMode] || shipment.shipmentMode} freight</td></tr>` : ""}
       <tr><td>Destination</td><td>${shipment.recipientCity}, ${shipment.recipientState}</td></tr>
       ${shipment.estimatedDelivery ? `<tr><td>Est. Delivery</td><td>${new Date(shipment.estimatedDelivery).toLocaleDateString("en-NG", { dateStyle: "medium" })}</td></tr>` : ""}
     </table>

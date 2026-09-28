@@ -16,6 +16,7 @@ async function sendInvoiceEmail({
   amount,
   trackingNumber,
   appliedDiscount, // { label, discountAmount } | null
+  shipmentMode, // "AIR" | "LAND" | "SEA" | undefined
   pdfBuffer,
 }) {
   const trackUrl = trackingNumber
@@ -55,6 +56,14 @@ async function sendInvoiceEmail({
       <p class="lbl">Tracking Number</p>
       <p class="val" style="font-size:16px;">${trackingNumber}</p>
     </div>
+    ${
+      shipmentMode
+        ? `<div class="info-box">
+      <p class="lbl">Mode of Shipment</p>
+      <p class="val" style="font-size:16px;">${{ AIR: "Air", LAND: "Land", SEA: "Sea" }[shipmentMode] || shipmentMode} freight</p>
+    </div>`
+        : ""
+    }
     <p><a href="${trackUrl}" class="btn">Track Your Shipment →</a></p>
     `
         : ""

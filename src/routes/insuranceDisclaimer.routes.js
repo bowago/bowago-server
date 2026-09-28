@@ -18,4 +18,7 @@ router.get("/", ctrl.getCurrentDisclaimer);
 router.post("/", authenticate, requireAdhocChargeManagement, ctrl.publishDisclaimer);
 router.get("/history", authenticate, requireAdhocChargeManagement, ctrl.listDisclaimerHistory);
 
+router.patch("/:id", authenticate, requireAdhocChargeManagement, ctrl.updateDisclaimer);
+router.delete("/:id", authenticate, requireAdhocChargeManagement, ctrl.deleteDisclaimer);
+
 module.exports = router;

@@ -342,6 +342,7 @@ async function emailInvoice(req, res) {
     invoiceNumber,
     amount: payment.amountKobo / 100,
     trackingNumber: payment.shipment?.trackingNumber,
+    shipmentMode: payment.shipment?.shipmentMode,
     appliedDiscount,
     pdfBuffer,
   });
@@ -692,6 +693,7 @@ async function autoGenerateInvoice(shipment) {
     invoiceNumber: `INV-${invoiceNumber}`,
     amount: payment.amountKobo / 100,
     trackingNumber: shipment.trackingNumber,
+    shipmentMode: shipment.shipmentMode,
     pdfBuffer,
   });
 

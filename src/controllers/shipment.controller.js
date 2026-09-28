@@ -3,7 +3,11 @@ const { checkProximityAndNotify } = require("../services/proximity.service");
 const {
   calculateShippingCost,
   getDeliveryEstimate,
+  assertModeActive,
 } = require("../services/pricing.service");
+const { recordUninsuredAck } = require("../services/insuranceDisclaimer.service");
+
+const MODE_LABELS = { AIR: "Air", LAND: "Land", SEA: "Sea" };
 const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
 const { notify } = require("../services/notify.service");
@@ -359,6 +363,9 @@ async function createShipment(req, res) {
 
   // PRD Sprint 3 state machine: Quoted → BOOKED (on creation) → Paid → Awaiting Pickup
   console.log("[createShipment] creating shipment record in DB...");
+  // [V1 Feature 1] A mode admin has switched off can no longer be booked.
+  await assertModeActive(shipmentMode || lockedQuote?.shipmentMode || "LAND");
+
   const shipment = await prisma.shipment.create({
     data: {
       trackingNumber: generateTrackingNumber(),
@@ -457,6 +464,38 @@ async function createShipment(req, res) {
 
   // Sprint 7: SHIPPING_RULES consent (fire-and-forget)
   recordConsent(req.user.id, "SHIPPING_RULES", req);
+
+  // [V1 Feature 7] Uninsured acknowledgment — stored with a snapshot of the
+  // disclaimer text/limit the customer was shown.
+  if (!requiresInsurance && uninsuredAck) {
+    recordUninsuredAck({
+      userId: req.user.id,
+      shipmentId: shipment.id,
+      declaredValueKobo: shipment.declaredValueKobo,
+      req,
+    });
+  }
+
+  // Booking Confirmed in-app notification — includes the mode of shipment.
+  try {
+    const modeLabel = MODE_LABELS[shipment.shipmentMode] || null;
+    const bookingNotification = await prisma.notification.create({
+      data: {
+        userId: req.user.id,
+        type: "SHIPMENT_UPDATE",
+        title: "Booking Confirmed",
+        body: `Your ${modeLabel ? `${modeLabel} freight ` : ""}shipment ${shipment.trackingNumber} has been booked.${cutoffWarning ? " Booked after 2PM — earliest pickup is next business day." : ""}`,
+        data: {
+          shipmentId: shipment.id,
+          trackingNumber: shipment.trackingNumber,
+          shipmentMode: shipment.shipmentMode,
+        },
+      },
+    });
+    notify(req.user.id, bookingNotification);
+  } catch (err) {
+    console.error("[createShipment] booking notification failed:", err.message);
+  }
 
   return created(
     res,
@@ -895,8 +934,13 @@ async function updateShipmentStatus(req, res) {
       title: `Shipment ${shipment.trackingNumber}`,
       body:
         description ||
-        `Your shipment is now ${status.replace(/_/g, " ").toLowerCase()}`,
-      data: { shipmentId: id, status, trackingNumber: shipment.trackingNumber },
+        `Your ${MODE_LABELS[shipment.shipmentMode] ? `${MODE_LABELS[shipment.shipmentMode]} freight ` : ""}shipment is now ${status.replace(/_/g, " ").toLowerCase()}`,
+      data: {
+        shipmentId: id,
+        status,
+        trackingNumber: shipment.trackingNumber,
+        shipmentMode: shipment.shipmentMode,
+      },
     },
   });
 

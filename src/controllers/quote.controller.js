@@ -1,5 +1,5 @@
 const { prisma } = require("../config/db");
-const { calculateShippingCost } = require("../services/pricing.service");
+const { calculateShippingCost, assertModeActive } = require("../services/pricing.service");
 const { applyAdhocChargesAtQuote } = require("../services/adhocCharge.service");
 const { ApiError } = require("../utils/ApiError");
 const { success, created } = require("../utils/helpers");
@@ -129,7 +129,10 @@ async function generateQuote(req, res) {
     assertDeclaredValue(declaredValue);
 
     const results = await Promise.allSettled(
-      modes.map((mode) => buildQuotePreview(req.body, mode, userId)),
+      modes.map(async (mode) => {
+        await assertModeActive(mode);
+        return buildQuotePreview(req.body, mode, userId);
+      }),
     );
 
     const modeOptions = modes.map((mode, i) => {
@@ -156,6 +159,7 @@ async function generateQuote(req, res) {
   if (!SHIPMENT_MODES.includes(shipmentMode)) {
     throw new ApiError(400, `shipmentMode must be one of ${SHIPMENT_MODES.join(", ")}`);
   }
+  await assertModeActive(shipmentMode);
   const declaredValueNumber = assertDeclaredValue(declaredValue);
 
   const quote = await buildQuotePreview(req.body, shipmentMode, userId);
@@ -279,6 +283,8 @@ async function generateQuote(req, res) {
       serviceType: record.serviceType,
       shipmentMode,
       transitHours: quote.transitHours,
+      deliveryEstimate: quote.deliveryEstimate,
+      distanceKm: quote.distanceKm,
       requiresDangerousGoodsNotice: DANGEROUS_GOODS_MODES.includes(shipmentMode),
       declaredValueNaira: declaredValueNumber,
       pricing: {

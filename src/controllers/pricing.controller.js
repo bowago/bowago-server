@@ -1,7 +1,7 @@
 const XLSX = require('xlsx');
 const { getEstimatedDelivery } = require('./deliverySLA.controller');
 const { prisma } = require('../config/db');
-const { calculateShippingCost } = require('../services/pricing.service');
+const { assertModeActive, calculateShippingCost } = require('../services/pricing.service');
 const { ApiError } = require('../utils/ApiError');
 const { success, created, getPagination, buildMeta } = require('../utils/helpers');
 
@@ -68,6 +68,8 @@ async function getQuote(req, res) {
   const resolvedDeclared = insuranceValue ?? declaredValue;
 
   const userId = req.user?.id || null;
+
+  await assertModeActive(shipmentMode || 'LAND');
 
   const quote = await calculateShippingCost({
     fromCity, toCity,

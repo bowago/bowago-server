@@ -10,7 +10,8 @@
 // Feature 4 (alternative phone numbers), pickup date, notes, promo code, and
 // the V1 Feature 7 uninsured-risk acknowledgment tick.
 const { prisma } = require("../config/db");
-const { calculateShippingCost } = require("../services/pricing.service");
+const { calculateShippingCost, assertModeActive } = require("../services/pricing.service");
+const { recordUninsuredAck } = require("../services/insuranceDisclaimer.service");
 const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { recordPromoRedemption } = require("./promoCode.controller");
 const { notify } = require("../services/notify.service");
@@ -265,6 +266,8 @@ async function confirmDraft(req, res) {
     throw new ApiError(400, `This quote has already been used (status: ${quote.status}). Please generate a new quote.`);
   }
 
+  await assertModeActive(quote.shipmentMode || "LAND");
+
   const details = { ...draft.details, insuranceOn: !!quote.insuranceSelected };
   validateDetails(details, { forConfirm: true });
 
@@ -433,23 +436,14 @@ async function confirmDraft(req, res) {
       })
       .catch(() => {});
   } else {
-    // [V1 Feature 7] Uninsured risk acknowledgment — immutable, records what
-    // the user was shown at the moment they ticked it.
-    prisma.consentLog
-      .create({
-        data: {
-          userId: req.user.id,
-          consentType: "UNINSURED_ACK",
-          referenceId: shipment.id,
-          metadata: {
-            declaredValueKobo: quote.declaredValueKobo,
-            liabilityLimitKobo: details.liabilityLimitKoboShown || null,
-            disclaimerVersion: details.disclaimerVersionShown || null,
-          },
-          ...consentBase,
-        },
-      })
-      .catch(() => {});
+    // [V1 Feature 7] Uninsured risk acknowledgment — immutable, stored with
+    // a snapshot of the disclaimer text/limit in force at booking time.
+    recordUninsuredAck({
+      userId: req.user.id,
+      shipmentId: shipment.id,
+      declaredValueKobo: quote.declaredValueKobo,
+      req,
+    });
   }
 
   if (quote.pricingMode === "PROMO" && quote.promoCode) {
@@ -468,8 +462,8 @@ async function confirmDraft(req, res) {
       userId: req.user.id,
       type: "SHIPMENT_UPDATE",
       title: "Booking Confirmed",
-      body: `Your shipment ${shipment.trackingNumber} has been booked. ${cutoffWarning ? "Booked after 2PM — earliest pickup is next business day." : ""}`,
-      data: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber },
+      body: `Your ${{ AIR: "Air", LAND: "Land", SEA: "Sea" }[shipment.shipmentMode] || "Land"} freight shipment ${shipment.trackingNumber} has been booked. ${cutoffWarning ? "Booked after 2PM — earliest pickup is next business day." : ""}`,
+      data: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber, shipmentMode: shipment.shipmentMode },
     },
   });
   notify(req.user.id, notification);

@@ -687,7 +687,24 @@ async function calculateShippingCost({
   };
 }
 
+const MODE_LABELS = { AIR: "Air", LAND: "Land", SEA: "Sea" };
+
+// [V1 Feature 1] A mode admin has switched off (Shipment Mode Settings ->
+// Inactive) must stop being bookable everywhere — not just hidden in one
+// form. A mode with no settings row yet is treated as active.
+async function assertModeActive(mode) {
+  if (!mode) return;
+  const setting = await prisma.shipmentModeSetting.findUnique({ where: { mode } });
+  if (setting && setting.isActive === false) {
+    throw new ApiError(
+      400,
+      `${MODE_LABELS[mode] || mode} shipping is currently unavailable. Please choose another mode of shipment.`,
+    );
+  }
+}
+
 module.exports = {
+  assertModeActive,
   calculateShippingCost,
   getZone,
   getDistance,
