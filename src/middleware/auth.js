@@ -147,6 +147,8 @@ const requireBulkNotify = requireCapability("canBulkNotify");
 const requireClaimsAccess = requireCapability("canManageClaims");
 const requireSurchargeManagement = requireCapability("canManageSurcharges");
 const requirePromoManagement = requireCapability("canManagePromos");
+// [V1] Adhoc charge types, suggestion rules, and the suggestion queue.
+const requireAdhocChargeManagement = requireCapability("canManageAdhocCharges");
 // Internal ops guard for platform-wide shipment operations (warehouse
 // weighing, address-change review, delay-alert broadcast, status updates
 // across ALL customers/enterprises). Distinct from the Enterprise tenant's
@@ -357,6 +359,7 @@ module.exports = {
   requireClaimsAccess,
   requireSurchargeManagement,
   requirePromoManagement,
+  requireAdhocChargeManagement,
   requireShipmentOpsManagement,
   requireShipmentDispatchAccess,
   requireEnterprise,

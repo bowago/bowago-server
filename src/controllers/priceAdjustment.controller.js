@@ -12,6 +12,7 @@ const {
   getBoolSetting,
 } = require("../services/settings.service");
 const { notify } = require("../services/notify.service");
+const { reEvaluateAtWeighIn } = require("../services/adhocCharge.service");
 
 const TIER_ORDER = ["ECONOMY", "STANDARD", "EXPRESS"];
 
@@ -20,12 +21,23 @@ function isResolved(adjustment) {
 }
 
 // ─── Admin/Dispatcher: Create price adjustment (weight discrepancy found at hub) ─
+// [V1 Feature 6] Also re-runs the adhoc rule engine against the measured
+// weight/dimensions from this same weigh-in (PRD Sprint 8: "the warehouse
+// weigh-in re-runs the adhoc rules on the measured weight and dimensions").
+// New AUTO_APPLY matches are folded straight into this same paused
+// adjustment (no separate approval step needed — the customer's approval of
+// this adjustment covers them). New SUGGEST matches are queued for admin
+// review instead (see reEvaluateAtWeighIn / adhocSuggestion.controller.js)
+// and never affect this adjustment's price.
 async function createPriceAdjustment(req, res) {
   const {
     shipmentId,
     adjustedPrice,
     reason,
     actualWeightKg,
+    actualLengthCm,
+    actualWidthCm,
+    actualHeightCm,
     proofImageUrl,
     proofImageUrls,
   } = req.body;
@@ -38,7 +50,80 @@ async function createPriceAdjustment(req, res) {
   });
   if (!shipment) throw new ApiError(404, "Shipment not found");
 
-  const difference = adjustedPrice - shipment.quotedPrice;
+  let difference = adjustedPrice - shipment.quotedPrice;
+  let finalAdjustedPrice = adjustedPrice;
+  let combinedReason = reason;
+  let adhocChargeIds = null;
+
+  // [V1] Re-run adhoc suggestion rules on the measured values from this
+  // weigh-in. Only meaningful once we actually have a measured weight.
+  if (actualWeightKg) {
+    try {
+      const volumetricWeightKg =
+        actualLengthCm && actualWidthCm && actualHeightCm
+          ? Math.ceil(((actualLengthCm * actualWidthCm * actualHeightCm) / 5000) * 2) / 2
+          : null;
+      const billableWeightKg = Math.max(
+        parseFloat(actualWeightKg),
+        volumetricWeightKg || 0,
+      );
+
+      const { autoApply, suggestedCount } = await reEvaluateAtWeighIn({
+        shipmentId,
+        shipmentMode: shipment.shipmentMode || "LAND",
+        measurements: {
+          actualWeightKg: parseFloat(actualWeightKg),
+          volumetricWeightKg,
+          billableWeightKg,
+          lengthCm: actualLengthCm || null,
+          widthCm: actualWidthCm || null,
+          heightCm: actualHeightCm || null,
+        },
+        // Best available proxy for the base price component — the rate
+        // engine's PERCENTAGE calc method uses this as its base.
+        basePriceKobo: Math.round(shipment.quotedPrice * 100),
+      });
+
+      if (autoApply.length > 0) {
+        const createdAdhocCharges = await prisma.$transaction(
+          autoApply.map((entry) =>
+            prisma.shipmentAdhocCharge.create({
+              data: {
+                shipmentId,
+                chargeTypeId: entry.chargeType.id,
+                ruleId: entry.rule.id,
+                nameSnapshot: entry.chargeType.name,
+                reason: entry.reason,
+                amountKobo: entry.amountKobo,
+                vatKobo: entry.chargeType.vatApplicable
+                  ? Math.round(entry.amountKobo * 0.075)
+                  : 0,
+                status: "PENDING_CUSTOMER_APPROVAL",
+              },
+            }),
+          ),
+        );
+        adhocChargeIds = createdAdhocCharges.map((c) => c.id);
+        const adhocTotalNaira = autoApply.reduce((sum, e) => sum + e.amountKobo, 0) / 100;
+        difference += adhocTotalNaira;
+        finalAdjustedPrice = shipment.quotedPrice + difference;
+        combinedReason = [
+          reason,
+          ...autoApply.map((e) => `${e.chargeType.name}: ${e.reason}`),
+        ]
+          .filter(Boolean)
+          .join(" | ");
+      }
+      if (suggestedCount > 0) {
+        console.log(
+          `[PriceAdjustment] ${suggestedCount} SUGGEST-behaviour adhoc match(es) queued for admin review on shipment ${shipmentId}`,
+        );
+      }
+    } catch (err) {
+      console.error("[PriceAdjustment] Adhoc rule re-evaluation failed (non-fatal):", err.message);
+    }
+  }
+
   if (difference <= 0)
     throw new ApiError(400, "Adjusted price must be higher than quoted price");
 
@@ -64,17 +149,22 @@ async function createPriceAdjustment(req, res) {
     data: {
       shipmentId,
       originalPrice: shipment.quotedPrice,
-      adjustedPrice,
+      adjustedPrice: finalAdjustedPrice,
       difference,
-      reason,
+      reason: combinedReason,
       actualWeightKg,
       proofImageUrl: imageUrls?.[0] || null,
       proofImageUrls: imageUrls || null,
       status: "PENDING",
       previousStatus: shipment.status,
       responseDeadline,
+      adhocChargeIds,
     },
   });
+
+  // Link the newly-created adhoc charge rows to this adjustment record now
+  // that it exists (kept as PENDING_CUSTOMER_APPROVAL until the customer
+  // resolves the adjustment — see acknowledge/downgrade/cancel below).
 
   await prisma.shipment.update({
     where: { id: shipmentId },
@@ -85,7 +175,7 @@ async function createPriceAdjustment(req, res) {
     data: {
       shipmentId,
       status: "PENDING_ADMIN_REVIEW",
-      description: `Shipment paused — weight discrepancy found at hub. ${reason}`,
+      description: `Shipment paused — weight discrepancy found at hub. ${combinedReason}`,
       updatedBy: req.user.id,
     },
   });
@@ -95,15 +185,16 @@ async function createPriceAdjustment(req, res) {
       userId: shipment.customerId,
       type: "PRICE_ADJUSTMENT",
       title: "Action Required: Price Adjustment",
-      body: `Your shipment ${shipment.trackingNumber} requires a price adjustment of ₦${difference.toLocaleString()}. ${reason} You have ${windowHours} hours to respond.`,
+      body: `Your shipment ${shipment.trackingNumber} requires a price adjustment of ₦${difference.toLocaleString()}. ${combinedReason} You have ${windowHours} hours to respond.`,
       data: {
         shipmentId,
         adjustmentId: adjustment.id,
         difference,
-        adjustedPrice,
+        adjustedPrice: finalAdjustedPrice,
         responseDeadline,
         proofImageUrl: imageUrls?.[0] || null,
         proofImageUrls: imageUrls,
+        adhocChargeIds,
       },
     },
   });
@@ -399,6 +490,17 @@ async function cancelAndRefund({
   let refundResult = null;
   if (payment && refundAmount > 0) {
     refundResult = await refundPayment(payment.reference, refundAmount);
+  }
+
+  // [V1] Reject any adhoc charge lines this adjustment covered — the
+  // shipment (and the extra charge with it) never went ahead.
+  if (Array.isArray(adjustment.adhocChargeIds) && adjustment.adhocChargeIds.length > 0) {
+    await prisma.shipmentAdhocCharge
+      .updateMany({
+        where: { id: { in: adjustment.adhocChargeIds }, status: "PENDING_CUSTOMER_APPROVAL" },
+        data: { status: "REJECTED" },
+      })
+      .catch((err) => console.error("[PriceAdjustment] Failed to reject adhoc charges:", err.message));
   }
 
   await prisma.notification

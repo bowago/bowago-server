@@ -109,6 +109,84 @@ enum ConsentType {
   REFUND_POLICY
   SHIPPING_RULES
   INSURANCE_TERMS
+  UNINSURED_ACK        // V1 Feature 7 — user acknowledged shipping without insurance
+  ON_BEHALF_AUTHORITY  // V1 Feature 3 — user confirmed authority to ship on someone else's behalf
+}
+
+// ─── V1 LAUNCH SCOPE ENUMS ──────────────────────────────────────────────────
+// V1 Feature 1 — Mode of shipment. Each mode has its own rates, transit time
+// and volumetric divisor (see ShipmentModeSetting / PriceBand.shipmentMode).
+enum ShipmentMode {
+  AIR
+  LAND
+  SEA
+}
+
+// V1 Feature 3 — who the sender of record is.
+enum SenderType {
+  MYSELF
+  ON_BEHALF_OF
+}
+
+// V1 Feature 3 — relationship of the account holder to the principal when
+// booking ON_BEHALF_OF.
+enum PrincipalRelationship {
+  CUSTOMER
+  MERCHANT
+  EMPLOYER
+  OTHER
+}
+
+// V1 Features 5/6 — how an adhoc charge type's amount is computed.
+enum AdhocCalcMethod {
+  FIXED
+  PER_KG
+  PERCENTAGE
+}
+
+// V1 Feature 6 — the measurement an adhoc suggestion rule compares against
+// its threshold.
+enum AdhocRuleMetric {
+  ACTUAL_WEIGHT
+  VOLUMETRIC_WEIGHT
+  BILLABLE_WEIGHT
+  VOLUME_CM3
+  LONGEST_SIDE
+}
+
+// V1 Feature 6 — comparison operator for a rule's threshold(s).
+// BETWEEN uses both thresholdMin and thresholdMax (inclusive).
+enum AdhocRuleOperator {
+  GT
+  GTE
+  LT
+  LTE
+  BETWEEN
+}
+
+// V1 Feature 6 — whether a matching rule adds its charge automatically or
+// only suggests it for admin review.
+enum AdhocChargeBehaviour {
+  AUTO_APPLY
+  SUGGEST
+}
+
+// V1 Features 5/6 — lifecycle of one adhoc charge line attached to a quote
+// or shipment.
+enum AdhocChargeStatus {
+  APPLIED                     // AUTO_APPLY rule matched, or admin added manually
+  SUGGESTED                   // SUGGEST rule matched, awaiting admin decision
+  APPROVED                    // admin approved a SUGGESTED charge (or a post-booking increase)
+  DISMISSED                   // admin dismissed a SUGGESTED charge
+  PENDING_CUSTOMER_APPROVAL   // post-booking increase awaiting the customer (Sprint 8 price-shock flow)
+  REJECTED                    // customer rejected / it timed out and was reversed
+}
+
+// V1 Feature 8 — shipment draft lifecycle (review-before-create flow).
+enum DraftStatus {
+  DRAFT
+  CONFIRMED
+  EXPIRED
 }
 
 enum SurchargeType {
@@ -228,6 +306,7 @@ model User {
   contractRate       ContractRate?
   promoRedemptions   PromoRedemption[]
   loyaltyAccount     LoyaltyAccount?   @relation("UserLoyalty")
+  shipmentDrafts     ShipmentDraft[]
 
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
@@ -380,6 +459,11 @@ model PriceBand {
   // Discount (optional — mutually exclusive with fixed price fields)
   discountPercent        Float?
   serviceType            ServiceType @default(STANDARD)
+  // [V1 Feature 1] Mode of shipment this band applies to. Defaulted to LAND
+  // on migration so every pre-existing band keeps working exactly as before
+  // (LAND was the only mode in practice pre-V1). Rate lookup now filters on
+  // zone + serviceType + shipmentMode + weight band (see pricing.service.js).
+  shipmentMode           ShipmentMode @default(LAND)
   validFrom              DateTime?
   validUntil             DateTime?
   notes                  String?
@@ -389,7 +473,161 @@ model PriceBand {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@index([zone, shipmentMode, serviceType])
   @@map("price_bands")
+}
+
+// ─── V1 Feature 1: per-mode settings (volumetric divisor, transit time) ─────
+// One row per ShipmentMode. Seeded with the pre-V1 default divisor (5000)
+// for all three modes so nothing changes until admin tunes them.
+model ShipmentModeSetting {
+  id                  String        @id @default(uuid())
+  mode                ShipmentMode  @unique
+  volumetricDivisor   Int           @default(5000)
+  transitHoursDefault Int?
+  isActive            Boolean       @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("shipment_mode_settings")
+}
+
+// ─── V1 Features 5/6: Adhoc charges ──────────────────────────────────────────
+// Admin-defined extra charge types (oversize handling, storage, weekend
+// pickup, etc). Never hard-deleted — deactivate instead. Every create/update/
+// deactivate writes an entry to PriceAuditLog with entityType
+// "AdhocChargeType" (same immutable audit pattern used for PriceBand rates).
+model AdhocChargeType {
+  id                String          @id @default(uuid())
+  name              String
+  description       String?
+  calcMethod        AdhocCalcMethod
+  // Kobo for FIXED/PER_KG; whole-number percent (e.g. 5 = 5%) for PERCENTAGE.
+  amountKobo        Int?
+  percentage        Float?
+  vatApplicable     Boolean         @default(true)
+  // e.g. ["AIR","SEA"] or [] / null to apply to every mode.
+  applicableModes   ShipmentMode[]
+  effectiveFrom     DateTime?
+  effectiveTo       DateTime?
+  isActive          Boolean         @default(true)
+  version           Int             @default(1)
+  createdBy         String?
+
+  rules             AdhocChargeRule[]
+  shipmentCharges   ShipmentAdhocCharge[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("adhoc_charge_types")
+}
+
+// ─── V1 Feature 6: Suggestion/auto-apply rules ───────────────────────────────
+// Compares a parcel's weight/volume metric against a threshold; on match,
+// links to one AdhocChargeType and either applies it automatically or drops
+// it into the admin suggestion queue. Same audit pattern as AdhocChargeType,
+// entityType "AdhocChargeRule".
+model AdhocChargeRule {
+  id              String                @id @default(uuid())
+  name            String
+  metric          AdhocRuleMetric
+  operator        AdhocRuleOperator
+  // For GT/GTE/LT/LTE only thresholdMin is used. BETWEEN uses both
+  // (inclusive), matching the PRD's operator list (>, >=, <, <=, BETWEEN).
+  thresholdMin    Float
+  thresholdMax    Float?
+  chargeTypeId    String
+  chargeType      AdhocChargeType       @relation(fields: [chargeTypeId], references: [id])
+  behaviour       AdhocChargeBehaviour  @default(SUGGEST)
+  applicableModes ShipmentMode[]
+  priority        Int                   @default(0)
+  effectiveFrom   DateTime?
+  effectiveTo     DateTime?
+  isActive        Boolean               @default(true)
+  version         Int                   @default(1)
+  createdBy       String?
+
+  matchedCharges  ShipmentAdhocCharge[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("adhoc_charge_rules")
+}
+
+// ─── V1 Features 5/6: one adhoc charge line attached to a quote or shipment ─
+// A snapshot — name/amount are copied at the moment the charge is applied so
+// later edits to the charge type never retroactively change what a customer
+// was already quoted or billed.
+model ShipmentAdhocCharge {
+  id             String            @id @default(uuid())
+  quoteId        String?
+  quote          Quote?            @relation(fields: [quoteId], references: [id])
+  shipmentId     String?
+  shipment       Shipment?         @relation(fields: [shipmentId], references: [id])
+  chargeTypeId   String
+  chargeType     AdhocChargeType   @relation(fields: [chargeTypeId], references: [id])
+  ruleId         String?           // null = added manually by admin, not rule-triggered
+  rule           AdhocChargeRule?  @relation(fields: [ruleId], references: [id])
+  // Snapshot at time of application — never mutated after creation.
+  nameSnapshot   String
+  reason         String?           // e.g. "Billable weight 32kg is above the 30kg threshold"
+  amountKobo     Int
+  vatKobo        Int               @default(0)
+  status         AdhocChargeStatus @default(APPLIED)
+  decidedByUserId String?
+  decisionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("shipment_adhoc_charges")
+}
+
+// ─── V1 Feature 7: Insurance risk disclaimer ─────────────────────────────────
+// Versioned, admin-editable wording + liability limit. Existing consent-log
+// entries keep the version the user actually saw, even after a new version
+// is published.
+model InsuranceDisclaimer {
+  id                 String    @id @default(uuid())
+  version            String    @unique
+  body               String
+  liabilityLimitKobo Int
+  effectiveFrom      DateTime  @default(now())
+  createdByUserId    String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("insurance_disclaimers")
+}
+
+// ─── V1 Feature 8: Shipment draft (review-before-create booking flow) ───────
+// Nothing is a real Shipment until CONFIRMED. DRAFT while being edited on the
+// review screen, EXPIRED 24h after creation if never confirmed (kept for
+// audit, cannot be confirmed once expired).
+model ShipmentDraft {
+  id            String       @id @default(uuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id])
+  quoteId       String
+  quote         Quote        @relation(fields: [quoteId], references: [id])
+  // Everything gathered on the "booking details" step — sender/recipient,
+  // sender type + principal, alternative numbers, pickup date, notes, etc.
+  // Kept as JSON since the review screen can PATCH any subset of it without
+  // a schema change per new field.
+  details       Json
+  status        DraftStatus  @default(DRAFT)
+  idempotencyKey String?     @unique
+  shipmentId    String?      @unique
+  shipment      Shipment?    @relation(fields: [shipmentId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("shipment_drafts")
 }
 
 model Surcharge {
@@ -479,6 +717,30 @@ model Shipment {
   insuranceValue   Float?
   notes            String?
 
+  // ── V1 launch scope additions ─────────────────────────────────────────
+  // Feature 1: mode of shipment, copied from the quote at booking time.
+  shipmentMode          ShipmentMode?
+  // Feature 2: value of items being sent — always captured, insured or not.
+  declaredValueKobo     Int?
+  insuranceSelected     Boolean       @default(false)
+  // Feature 7: when the uninsured-risk disclaimer was acknowledged (null
+  // while insured, or before the review-screen tick is recorded).
+  uninsuredAckAt        DateTime?
+  // Feature 3: who the sender of record is, and — for ON_BEHALF_OF — the
+  // real owner of the goods. The account holder (`customer` below) always
+  // stays the billing party regardless of sender type.
+  senderType            SenderType    @default(MYSELF)
+  principalName         String?
+  principalPhone        String?
+  principalEmail        String?
+  principalRelationship PrincipalRelationship?
+  authorityConfirmed    Boolean       @default(false)
+  // Feature 4: backup contact numbers. senderAltPhone is optional (and for
+  // ON_BEHALF_OF belongs to the principal); recipientAltPhone is required
+  // at booking. Both are masked on the guest tracking page.
+  senderAltPhone        String?
+  recipientAltPhone     String?
+
   customer         User            @relation("CustomerShipments", fields: [customerId], references: [id])
   assignedTo       User?           @relation("AssignedShipments", fields: [assignedToId], references: [id])
   trackingHistory  TrackingEvent[]
@@ -488,6 +750,8 @@ model Shipment {
   claims           Claim[]
   priceAdjustments PriceAdjustment[]
   quote            Quote?
+  adhocCharges     ShipmentAdhocCharge[]
+  draft            ShipmentDraft?
   // FIX: SupportTicket.shipmentId had no relation back to Shipment, so
   // admin/customer ticket views could never resolve a tracking number —
   // they only ever had the raw shipmentId. Added so listTickets/getTicket
@@ -595,6 +859,11 @@ model PriceAdjustment {
   // Support/admin override of the deadline
   extendedBy      String?
   extensionNote   String?
+  // [V1 Feature 6] IDs of ShipmentAdhocCharge rows this adjustment covers,
+  // when the price shock came from adhoc rules re-run at weigh-in rather
+  // than (or in addition to) a plain weight discrepancy. Null for
+  // weight-only adjustments, preserving pre-V1 behaviour exactly.
+  adhocChargeIds  Json?
 
   shipment        Shipment  @relation(fields: [shipmentId], references: [id])
 
@@ -971,6 +1240,11 @@ model AdminRolePermission {
   canBulkNotify           Boolean @default(false)
   canViewAuditLogs        Boolean @default(false)
   canManageOrganization   Boolean @default(false)
+  // [V1] Manage adhoc charge types, suggestion rules, and the suggestion
+  // approval queue (admin_role_permissions.adhoc_charges:READ/CREATE/UPDATE
+  // in the PRD — modeled as a single capability flag, consistent with every
+  // other capability on this table).
+  canManageAdhocCharges   Boolean @default(false)
   // Role label (e.g. "Rate Manager", "CS Lead")
   roleLabel        String?
   notes            String?
@@ -1008,16 +1282,28 @@ model Quote {
   heightCm              Float?
   // Pricing
   serviceType           ServiceType @default(STANDARD)
+  // [V1 Feature 1] Mode of shipment (AIR/LAND/SEA). Nullable so quotes
+  // generated before V1 shipped remain readable without a backfill; every
+  // quote created going forward through the V1 flow always sets this.
+  shipmentMode          ShipmentMode?
   basePriceKobo         Int         // stored in kobo to avoid float errors
   fuelSurchargeKobo     Int         @default(0)
   remoteAreaFeeKobo     Int         @default(0)
+  // [V1 Features 5/6] Sum of all adhoc charge lines attached to this quote
+  // (see ShipmentAdhocCharge). Included in vatKobo/totalPriceKobo the same
+  // way fuel/remote-area fees are — see the updated price formula.
+  adhocChargesKobo      Int         @default(0)
   vatKobo               Int         @default(0)
   totalPriceKobo        Int
   surchargeBreakdown    Json?
   // Insurance
   insuranceSelected     Boolean     @default(false)
+  // [V1 Feature 2] Always required going forward, whether or not insurance
+  // is selected — kept nullable at the DB level only for pre-V1 rows.
   declaredValueKobo     Int?
   insurancePremiumKobo  Int?
+  adhocCharges          ShipmentAdhocCharge[]
+  drafts                ShipmentDraft[]
   // Pricing mode — records which rate path was used at quote time (Gap 6)
   pricingMode           String    @default("STANDARD") // STANDARD | CONTRACT | PROMO
   // Promo
@@ -1046,10 +1332,19 @@ model ConsentLog {
   userId        String?
   sessionId     String?     // for guest consent
   consentType   ConsentType
-  tcVersion     String      // e.g. "v1.2"
+  tcVersion     String      // e.g. "v1.2" — also used for disclaimer version on UNINSURED_ACK
   acceptedAt    DateTime    @default(now())
   ipAddress     String?
   userAgent     String?
+  // [V1] Quote or shipment id this consent was captured against (e.g. which
+  // quote's declared value the UNINSURED_ACK notice showed, or which
+  // shipment's ON_BEHALF_AUTHORITY tick this is). Null for the older
+  // account-wide consent types (TERMS_OF_SERVICE etc.) which aren't tied to
+  // one quote/shipment.
+  referenceId   String?
+  // [V1] Extra context the immutable log needs to keep, e.g. for
+  // UNINSURED_ACK: { declaredValueKobo, liabilityLimitKobo }.
+  metadata      Json?
 
   user          User?       @relation("UserConsents", fields: [userId], references: [id])
 

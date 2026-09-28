@@ -30,6 +30,7 @@
 
 const { prisma } = require("../config/db");
 const socketService = require("./socket.service");
+const { sendSms, isConfigured: smsConfigured } = require("./sms.service");
 
 const PROXIMITY_THRESHOLD_METERS = 500;
 
@@ -72,6 +73,9 @@ async function checkProximityAndNotify(shipmentId, driverLat, driverLng) {
       pickupLat: true,
       pickupLng: true,
       proximityAlertSent: true,
+      // [V1 Feature 4] fallback SMS target if the sender's main number can't
+      // be reached — see the send below.
+      senderAltPhone: true,
     },
   });
 
@@ -133,6 +137,21 @@ async function checkProximityAndNotify(shipmentId, driverLat, driverLng) {
     trackingNumber: shipment.trackingNumber,
     deepLink: `/track/${shipment.trackingNumber}`,
   });
+
+  // [V1 Feature 4] "If the main number cannot be reached, the reminder is
+  // also sent by SMS to the alternative number." This codebase has no call
+  // telephony integration to detect an unanswered call, so — as a practical
+  // stand-in — the alt number always gets an SMS fallback alongside the
+  // in-app push whenever one is on file. Best-effort: never blocks the
+  // response, and a missing/unconfigured SMS provider is silently skipped.
+  if (shipment.senderAltPhone && smsConfigured()) {
+    sendSms(
+      shipment.senderAltPhone,
+      `BowaGo: Your driver is arriving in ~30 minutes for shipment ${shipment.trackingNumber}. Please have your package ready.`,
+    ).catch((err) =>
+      console.error("[Proximity] Alt-number SMS fallback failed:", err.message),
+    );
+  }
 
   return {
     notified: true,

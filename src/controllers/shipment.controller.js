@@ -76,6 +76,20 @@ async function createShipment(req, res) {
     pickupDate,
     quoteId,
     promoCode,
+    // ── V1 launch scope (all optional here for backward compatibility — the
+    // dedicated /shipment-drafts flow is the fully-validated path; this
+    // legacy endpoint accepts these best-effort so existing frontend clients
+    // aren't forced to migrate immediately) ──────────────────────────────
+    shipmentMode,
+    senderType,
+    principalName,
+    principalPhone,
+    principalEmail,
+    principalRelationship,
+    authorityConfirmed,
+    senderAltPhone,
+    recipientAltPhone,
+    uninsuredAck,
   } = req.body;
 
   console.log(
@@ -276,6 +290,7 @@ async function createShipment(req, res) {
       customWidth,
       customHeight,
       serviceType: resolvedServiceType,
+      shipmentMode: shipmentMode || "LAND",
       isFragile: !!isFragile,
       requiresInsurance: !!requiresInsurance,
       insuranceValue: resolvedInsuranceValue,
@@ -378,6 +393,20 @@ async function createShipment(req, res) {
       notes: notes || null,
       pickupDate: resolvedPickupDate,
       estimatedDelivery: slaResult.estimatedDelivery,
+      // ── V1 launch scope (best-effort on this legacy endpoint — see the
+      // fully-validated /shipment-drafts flow for the enforced version) ──
+      shipmentMode: shipmentMode || (lockedQuote ? lockedQuote.shipmentMode : null) || null,
+      declaredValueKobo: lockedQuote?.declaredValueKobo ?? (resolvedInsuranceValue ? Math.round(resolvedInsuranceValue * 100) : null),
+      insuranceSelected: !!requiresInsurance,
+      uninsuredAckAt: !requiresInsurance && uninsuredAck ? new Date() : null,
+      senderType: senderType === "ON_BEHALF_OF" ? "ON_BEHALF_OF" : "MYSELF",
+      principalName: senderType === "ON_BEHALF_OF" ? principalName || null : null,
+      principalPhone: senderType === "ON_BEHALF_OF" ? principalPhone || null : null,
+      principalEmail: senderType === "ON_BEHALF_OF" ? principalEmail || null : null,
+      principalRelationship: senderType === "ON_BEHALF_OF" ? principalRelationship || null : null,
+      authorityConfirmed: senderType === "ON_BEHALF_OF" ? !!authorityConfirmed : false,
+      senderAltPhone: senderAltPhone || null,
+      recipientAltPhone: recipientAltPhone || null,
       trackingHistory: {
         create: {
           status: "PENDING",
@@ -619,6 +648,15 @@ async function trackShipment(req, res) {
         weight: true,
         weightUnit: true,
         cartons: true,
+        // ── V1 launch scope fields ────────────────────────────────────────
+        shipmentMode: true,
+        senderType: true,
+        principalName: true,
+        principalPhone: true,
+        principalEmail: true,
+        senderAltPhone: true,
+        recipientAltPhone: true,
+        declaredValueKobo: true,
         trackingHistory: {
           orderBy: { createdAt: "asc" },
           select: {
@@ -647,6 +685,10 @@ async function trackShipment(req, res) {
   // PRD Sprint 4: "123 Main Street, Lagos, Lagos State, NG" → "Lagos, Lagos State, NG"
   // Guests see city + state only; map marker still shows exact location.
   // Logged-in owners see full street address.
+  // [V1] For ON_BEHALF_OF shipments the guest page must show the account
+  // holder only, never the principal — so a guest never sees senderName
+  // replaced with the real owner's name either.
+  const isOnBehalf = shipment.senderType === "ON_BEHALF_OF";
   const masked = {
     ...shipment,
     senderAddress: isOwner
@@ -662,10 +704,24 @@ async function trackShipment(req, res) {
     recipientName: isOwner
       ? shipment.recipientName
       : (shipment.recipientName?.split(" ")[0] ?? "") + " ***",
-    senderName: isOwner
-      ? shipment.senderName
-      : (shipment.senderName?.split(" ")[0] ?? "") + " ***",
+    senderName:
+      isOwner || !isOnBehalf
+        ? shipment.senderName
+        : "BowaGo Customer", // [V1] never reveal the principal to a guest
   };
+
+  // [V1 Fields never shown to guests] product value, alternative numbers,
+  // principal phone/email, and adhoc charge details. Mode of shipment IS
+  // shown to everyone (PRD Sprint 4 explicitly puts it on the tracking page
+  // for guests and owners alike).
+  if (!isOwner) {
+    delete masked.declaredValueKobo;
+    delete masked.senderAltPhone;
+    delete masked.recipientAltPhone;
+    delete masked.principalName;
+    delete masked.principalPhone;
+    delete masked.principalEmail;
+  }
 
   // Remove internal fields from response
   delete masked.customerId;

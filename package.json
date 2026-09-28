@@ -11,7 +11,8 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
-    "seed": "node prisma/seed.js"
+    "seed": "node prisma/seed.js",
+    "seed:mode-rates": "node prisma/seed-mode-rates.js"
   },
   "keywords": [],
   "author": "Calstins Ltd",

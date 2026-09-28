@@ -36,6 +36,14 @@ const adminRoleRoutes = require("./routes/adminRole.routes");
 // checkout flow) could ever have worked.
 const policyRoutes = require("./routes/policy.routes");
 const promoCodeRoutes = require("./routes/promoCode.routes");
+// [V1 Launch Scope] Mode of shipment, adhoc charges/rules/suggestions,
+// insurance disclaimer, and the review-before-create shipment draft flow.
+const shipmentModeRoutes = require("./routes/shipmentMode.routes");
+const adhocChargeRoutes = require("./routes/adhocCharge.routes");
+const adhocChargeRuleRoutes = require("./routes/adhocChargeRule.routes");
+const adhocSuggestionRoutes = require("./routes/adhocSuggestion.routes");
+const insuranceDisclaimerRoutes = require("./routes/insuranceDisclaimer.routes");
+const shipmentDraftRoutes = require("./routes/shipmentDraft.routes");
 
 const app = express();
 
@@ -301,6 +309,13 @@ app.use("/api/v1/admin/roles", adminRoleRoutes);
 app.use("/api/v1/organization", require("./routes/organization.routes"));
 app.use("/api/v1/policies", policyRoutes);
 app.use("/api/v1/promo-codes", promoCodeRoutes);
+// [V1 Launch Scope]
+app.use("/api/v1/admin/shipment-modes", shipmentModeRoutes);
+app.use("/api/v1/admin/adhoc-charges", adhocChargeRoutes);
+app.use("/api/v1/admin/adhoc-rules", adhocChargeRuleRoutes);
+app.use("/api/v1/admin/adhoc-suggestions", adhocSuggestionRoutes);
+app.use("/api/v1/admin/insurance-disclaimer", insuranceDisclaimerRoutes);
+app.use("/api/v1/shipment-drafts", shipmentDraftRoutes);
 
 app.get("/", (req, res) => {
   res.status(200).json({

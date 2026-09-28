@@ -75,6 +75,25 @@ async function getDashboardStats(req, res) {
     color: SERVICE_COLORS[r.serviceType ?? ''] ?? '#6b7280',
   }));
 
+  // [V1] Shipment mode distribution (Air/Land/Sea) — null (pre-V1) shipments
+  // are grouped as "Unspecified" so old data doesn't just vanish silently.
+  const modeAgg = await prisma.shipment.groupBy({
+    by: ['shipmentMode'],
+    _count: { _all: true },
+  });
+  const totalMode = modeAgg.reduce((s, r) => s + r._count._all, 0) || 1;
+  const MODE_COLORS = {
+    AIR: '#8b5cf6',
+    LAND: '#f59e0b',
+    SEA: '#0ea5e9',
+  };
+  const modeDistribution = modeAgg.map(r => ({
+    name: r.shipmentMode || 'Unspecified',
+    value: Math.round((r._count._all / totalMode) * 100),
+    count: r._count._all,
+    color: MODE_COLORS[r.shipmentMode ?? ''] ?? '#9ca3af',
+  }));
+
   return success(res, {
     users: { total: totalUsers, customers: totalCustomers, admins: totalAdmins },
     shipments: {
@@ -89,6 +108,7 @@ async function getDashboardStats(req, res) {
     trend,
     topRoutes,
     serviceDistribution,
+    modeDistribution,
   });
 }
 

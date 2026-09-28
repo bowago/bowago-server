@@ -226,7 +226,9 @@ async function generateInvoicePDF(data) {
       doc,
       "Ship From",
       [
-        shipment.senderName,
+        shipment.senderType === "ON_BEHALF_OF" && shipment.principalName
+          ? `${shipment.principalName} (on behalf of ${shipment.senderName})`
+          : shipment.senderName,
         shipment.senderAddress,
         `${shipment.senderCity}, ${shipment.senderState}`,
         shipment.senderPhone,
@@ -271,7 +273,7 @@ async function generateInvoicePDF(data) {
     const rows = [
       {
         desc: `Shipping — ${shipment.senderCity} → ${shipment.recipientCity}`,
-        detail: `Zone ${shipment.zone} | ${shipment.weight}kg | ${shipment.serviceType || "STANDARD"}`,
+        detail: `Zone ${shipment.zone} | ${shipment.weight}kg | ${shipment.serviceType || "STANDARD"} | ${shipment.shipmentMode || "LAND"}`,
         amount: shipment.quotedPrice,
       },
       ...(surchargeBreakdown || []).map((s) => ({
@@ -432,6 +434,22 @@ async function generateShippingLabelPDF(shipment) {
         width: 69,
       });
 
+    // [V1 Feature 1] Mode of shipment badge — sits in the gap between the
+    // logo and the service-type badge. Plain text only — Helvetica (a
+    // standard PDF base font) has no emoji glyphs, so an emoji here would
+    // print as a missing-glyph box on the physical label.
+    const MODE_COLORS = { AIR: "#8b5cf6", LAND: BRAND.orange, SEA: "#0ea5e9" };
+    const mode = shipment.shipmentMode || "LAND";
+    doc.rect(93, 12, 100, 24).fill(MODE_COLORS[mode] || BRAND.gray);
+    doc
+      .fillColor(BRAND.white)
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text(`BY ${mode}`, 93, 22, {
+        align: "center",
+        width: 100,
+      });
+
     // Tracking number — large and scannable
     drawRule(doc, 42, BRAND.border);
     doc
@@ -460,6 +478,14 @@ async function generateShippingLabelPDF(shipment) {
       .text(`${shipment.zone}`, 225, 94);
 
     // FROM block
+    // [V1 Feature 3] For ON_BEHALF_OF shipments, the principal is the
+    // sender of record on the label — never the account holder who booked
+    // it. senderPhone/senderAddress stay as entered on the booking form
+    // (the pickup location), only the displayed name changes.
+    const fromName =
+      shipment.senderType === "ON_BEHALF_OF" && shipment.principalName
+        ? shipment.principalName
+        : shipment.senderName;
     doc
       .fillColor(BRAND.orange)
       .font("Helvetica-Bold")
@@ -469,7 +495,7 @@ async function generateShippingLabelPDF(shipment) {
       .fillColor(BRAND.dark)
       .font("Helvetica-Bold")
       .fontSize(10)
-      .text(shipment.senderName, 15, 96, { width: 200 });
+      .text(fromName, 15, 96, { width: 200 });
     doc
       .fillColor(BRAND.gray)
       .font("Helvetica")
@@ -505,11 +531,21 @@ async function generateShippingLabelPDF(shipment) {
       .font("Helvetica")
       .fontSize(8)
       .text(`Phone: ${shipment.recipientPhone}`, 15, 196);
+    // [V1 Feature 4] Alternative recipient number — required at booking now,
+    // and the single most useful addition to a physical label for a driver
+    // who can't reach the primary number at the door.
+    if (shipment.recipientAltPhone) {
+      doc
+        .fillColor(BRAND.gray)
+        .font("Helvetica")
+        .fontSize(8)
+        .text(`Alt: ${shipment.recipientAltPhone}`, 15, 206);
+    }
 
-    drawRule(doc, 212, BRAND.border);
+    drawRule(doc, 222, BRAND.border);
 
     // Package info row
-    const pkgY = 220;
+    const pkgY = 230;
     doc
       .fillColor(BRAND.gray)
       .font("Helvetica")
@@ -526,15 +562,15 @@ async function generateShippingLabelPDF(shipment) {
       .text(formatDate(shipment.createdAt), 175, pkgY + 10);
 
     if (shipment.isFragile) {
-      doc.rect(15, 240, 100, 14).fill("#FFF3E0");
+      doc.rect(15, 250, 100, 14).fill("#FFF3E0");
       doc
         .fillColor(BRAND.orange)
         .font("Helvetica-Bold")
         .fontSize(7)
-        .text("⚠  FRAGILE — HANDLE WITH CARE", 18, 244);
+        .text("⚠  FRAGILE — HANDLE WITH CARE", 18, 254);
     }
 
-    drawRule(doc, 262, BRAND.border);
+    drawRule(doc, 272, BRAND.border);
 
     // Notes / special instructions
     if (shipment.notes) {
@@ -542,12 +578,12 @@ async function generateShippingLabelPDF(shipment) {
         .fillColor(BRAND.gray)
         .font("Helvetica")
         .fontSize(7)
-        .text("NOTES", 15, 267);
+        .text("NOTES", 15, 277);
       doc
         .fillColor(BRAND.dark)
         .font("Helvetica")
         .fontSize(8)
-        .text(shipment.notes, 15, 277, { width: 258 });
+        .text(shipment.notes, 15, 287, { width: 258 });
     }
 
     // Footer
@@ -639,10 +675,15 @@ async function generateBookingConfirmationPDF(data) {
     drawRule(doc, doc.y);
     doc.y += 12;
 
+    const fromName =
+      shipment.senderType === "ON_BEHALF_OF" && shipment.principalName
+        ? `${shipment.principalName} (sent on their behalf by ${shipment.senderName})`
+        : shipment.senderName;
+
     const details = [
       [
         "From",
-        `${shipment.senderName} — ${shipment.senderCity}, ${shipment.senderState}`,
+        `${fromName} — ${shipment.senderCity}, ${shipment.senderState}`,
       ],
       [
         "To",
@@ -650,6 +691,8 @@ async function generateBookingConfirmationPDF(data) {
       ],
       ["Weight", `${shipment.weight}kg`],
       ["Service", shipment.serviceType || "STANDARD"],
+      // [V1 Feature 1]
+      ["Mode of Shipment", shipment.shipmentMode || "LAND"],
       [
         "Zone",
         `Zone ${shipment.zone} (${shipment.distanceKm ? Math.round(shipment.distanceKm) + "km" : "N/A"})`,
@@ -666,6 +709,14 @@ async function generateBookingConfirmationPDF(data) {
           ? formatDate(shipment.estimatedDelivery)
           : "To be confirmed",
       ],
+      // [V1 Feature 2] Value of items being sent is always captured now —
+      // shown here regardless of whether insurance was selected.
+      ...(shipment.declaredValueKobo
+        ? [[
+            "Value of Items Sent",
+            `${formatNaira(shipment.declaredValueKobo / 100)}${shipment.insuranceSelected ? " (Insured)" : " (Not insured)"}`,
+          ]]
+        : []),
     ];
 
     for (const [label, value] of details) {

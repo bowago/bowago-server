@@ -128,6 +128,28 @@ router.get('/:id', ctrl.getQuote);
 
 /**
  * @swagger
+ * /quotes/{id}/refresh:
+ *   post:
+ *     summary: "[V1] Refresh an expired quote with the same inputs at current rates"
+ *     tags: [Quotes]
+ *     security: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       201:
+ *         description: New quote generated
+ *       400:
+ *         description: Quote already booked
+ *       404:
+ *         description: Quote not found
+ */
+router.post('/:id/refresh', optionalAuth, ctrl.refreshQuote);
+
+/**
+ * @swagger
  * /quotes/{id}/cancel:
  *   patch:
  *     summary: Cancel a quote

@@ -59,8 +59,13 @@ async function getQuote(req, res) {
     fromCity, toCity, weightKg, tons, cartons,
     boxDimensionId, customLength, customWidth, customHeight,
     serviceType, isFragile, requiresInsurance, insuranceValue,
-    promoCode,
+    promoCode, shipmentMode,
+    // Aliases: the quote forms send insuranceSelected/declaredValue
+    // (same names as POST /quotes) rather than requiresInsurance/insuranceValue.
+    insuranceSelected, declaredValue,
   } = req.body;
+  const wantsInsurance = requiresInsurance ?? insuranceSelected;
+  const resolvedDeclared = insuranceValue ?? declaredValue;
 
   const userId = req.user?.id || null;
 
@@ -69,9 +74,10 @@ async function getQuote(req, res) {
     weightKg, tons, cartons,
     boxDimensionId, customLength, customWidth, customHeight,
     serviceType: serviceType || 'STANDARD',
+    shipmentMode: shipmentMode || 'LAND',
     isFragile: !!isFragile,
-    requiresInsurance: !!requiresInsurance,
-    insuranceValue: requiresInsurance ? (insuranceValue || 0) : 0,
+    requiresInsurance: !!wantsInsurance,
+    insuranceValue: wantsInsurance ? (resolvedDeclared || 0) : 0,
     promoCode: promoCode || null,
     userId,
   });
@@ -255,14 +261,15 @@ async function updateDimension(req, res) {
 
 // ─── PRICE BANDS ──────────────────────────────────────────────────────────────
 async function listPriceBands(req, res) {
-  const { zone, serviceType, isActive } = req.query;
+  const { zone, serviceType, isActive, shipmentMode } = req.query;
   const bands = await prisma.priceBand.findMany({
     where: {
       ...(zone        && { zone: parseInt(zone) }),
       ...(serviceType && { serviceType }),
+      ...(shipmentMode && { shipmentMode }),
       ...(isActive !== undefined && { isActive: isActive === 'true' }),
     },
-    orderBy: [{ serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }],
+    orderBy: [{ shipmentMode: 'asc' }, { serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }],
   });
   return success(res, { bands });
 }
@@ -281,6 +288,7 @@ async function createPriceBand(req, res) {
     discountPercent,
     minKg, maxKg, minTons, maxTons, minCartons, maxCartons,
     validFrom, validUntil, notes, isActive,
+    shipmentMode, // [V1 Feature 1] AIR | LAND | SEA — defaults to LAND
   } = req.body;
 
   // Validate: must have at least one pricing mechanism
@@ -297,6 +305,7 @@ async function createPriceBand(req, res) {
   const data = {
     label:                  label      || null,
     serviceType:            serviceType || 'STANDARD',
+    shipmentMode:           shipmentMode || 'LAND',
     zone:                   fixedPricePerKgByZone ? null : (zone !== undefined ? parseInt(zone) : null),
     pricePerKg:             pricePerKg  ? parseFloat(pricePerKg)  : null,
     basePrice:              basePrice   ? parseFloat(basePrice)   : null,
@@ -516,6 +525,7 @@ async function rollbackPriceBand(req, res) {
     data: {
       zone:                  prev.zone,
       serviceType:           prev.serviceType,
+      shipmentMode:          prev.shipmentMode || 'LAND',
       label:                 prev.label,
       minKg:                 prev.minKg,
       maxKg:                 prev.maxKg,

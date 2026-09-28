@@ -185,6 +185,15 @@ async function verifyPayment(reference) {
           where: { id: adjustment.id },
           data: { status: 'PAID', resolutionType: 'PAY', resolvedAt: new Date(), isPaid: true, paymentRef: reference },
         });
+        // [V1] Any adhoc charge lines this adjustment covered are now
+        // actually paid for — move them from PENDING_CUSTOMER_APPROVAL to
+        // APPROVED so they show up as billed lines on the invoice/label.
+        if (Array.isArray(adjustment.adhocChargeIds) && adjustment.adhocChargeIds.length > 0) {
+          await prisma.shipmentAdhocCharge.updateMany({
+            where: { id: { in: adjustment.adhocChargeIds }, status: 'PENDING_CUSTOMER_APPROVAL' },
+            data: { status: 'APPROVED' },
+          }).catch((err) => console.error('[Paystack Webhook] Failed to approve adhoc charges:', err.message));
+        }
       }
 
       await prisma.trackingEvent.create({

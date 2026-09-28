@@ -1,11 +1,36 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
+const { evaluateRules } = require("./adhocCharge.service");
 
 // ─── Volumetric weight (Sprint 1 spec) ────────────────────────────────────────
-// Formula: (L × W × H) / 5000  →  rounded UP to nearest 0.5kg
-function calcVolumetricWeight(l, w, h) {
-  const raw = (parseFloat(l) * parseFloat(w) * parseFloat(h)) / 5000;
+// Formula: (L × W × H) / divisor  →  rounded UP to nearest 0.5kg
+// [V1 Feature 1] The divisor defaults to 5000 (1kg per 5000cm³) but is now
+// configurable per shipment mode via ShipmentModeSetting — see
+// getVolumetricDivisor below.
+function calcVolumetricWeight(l, w, h, divisor = 5000) {
+  const raw = (parseFloat(l) * parseFloat(w) * parseFloat(h)) / divisor;
   return Math.ceil(raw * 2) / 2;
+}
+
+// ─── [V1 Feature 1] Per-mode volumetric divisor + transit hours ──────────────
+// Falls back to the pre-V1 default (5000) for any mode admin hasn't
+// configured yet, or when no mode is given at all (legacy callers).
+const DEFAULT_MODE_SETTINGS = { volumetricDivisor: 5000, transitHoursDefault: null };
+
+async function getModeSetting(mode) {
+  if (!mode) return DEFAULT_MODE_SETTINGS;
+  const setting = await prisma.shipmentModeSetting.findUnique({ where: { mode } });
+  return setting || DEFAULT_MODE_SETTINGS;
+}
+
+async function listModeSettings() {
+  const modes = ["AIR", "LAND", "SEA"];
+  const rows = await prisma.shipmentModeSetting.findMany();
+  const byMode = Object.fromEntries(rows.map((r) => [r.mode, r]));
+  return modes.map(
+    (mode) =>
+      byMode[mode] || { mode, ...DEFAULT_MODE_SETTINGS, isActive: true, id: null },
+  );
 }
 
 function roundHalf(val) {
@@ -153,6 +178,24 @@ async function applySurcharges(
   const breakdown = [];
   let totalSurcharge = 0;
 
+  // [V1 Features 5/6] Adhoc charges (AUTO_APPLY only — SUGGEST charges never
+  // touch the customer's total). Each is its own named breakdown line with
+  // its trigger reason, same as the PRD requires on quote/review/invoice.
+  const adhocCharges = options.adhocCharges || [];
+  for (const a of adhocCharges) {
+    breakdown.push({
+      type: "ADHOC",
+      label: `Added automatically: ${a.name}`,
+      description: a.reason,
+      amount: a.amountNaira,
+      vatApplicable: a.vatApplicable,
+    });
+    totalSurcharge += a.amountNaira;
+  }
+  const adhocTaxableNaira = adhocCharges
+    .filter((a) => a.vatApplicable)
+    .reduce((sum, a) => sum + a.amountNaira, 0);
+
   // ── Pass 1: all non-VAT surcharges ────────────────────────────────────────
   // PRD Sprint 1 formula: VAT = (base_price + fuel_surcharge + remote_area_fee)
   // × rate. Insurance premium is explicitly NOT subject to VAT, so VAT must be
@@ -183,13 +226,15 @@ async function applySurcharges(
     }
   }
 
-  // ── Pass 2: VAT on (base + fuel + remote area) only ──────────────────────
+  // ── Pass 2: VAT on (base + fuel + remote area + taxable adhoc) only ──────
   const vatRow = surcharges.find((s) => s.type === "VAT");
   if (vatRow) {
     const fuelAmount = breakdown.find((b) => b.type === "FUEL")?.amount || 0;
     const remoteAmount =
       breakdown.find((b) => b.type === "REMOTE_AREA")?.amount || 0;
-    const vatBase = basePrice + fuelAmount + remoteAmount;
+    // [V1] Updated price formula: VAT = ROUND((base + fuel + remote +
+    // taxable adhoc) × rate). Insurance premium stays outside VAT entirely.
+    const vatBase = basePrice + fuelAmount + remoteAmount + adhocTaxableNaira;
 
     let vatAmount = 0;
     if (vatRow.ratePercent) {
@@ -399,6 +444,9 @@ async function calculateShippingCost({
   customWidth,
   customHeight,
   serviceType = "STANDARD",
+  // [V1 Feature 1] Mode of shipment. Defaults to LAND so every pre-existing
+  // caller (price adjustments, legacy bookings) behaves exactly as before.
+  shipmentMode = "LAND",
   isFragile = false,
   requiresInsurance = false,
   insuranceValue = 0,
@@ -409,8 +457,18 @@ async function calculateShippingCost({
   const { zone, fromCity: from, toCity: to } = await getZone(fromCity, toCity);
   const distanceKm = await getDistance(from.id, to.id);
 
+  // [V1] Per-mode volumetric divisor (default 5000, admin-configurable).
+  const modeSetting = await getModeSetting(shipmentMode);
+  const volumetricDivisor = modeSetting.volumetricDivisor || 5000;
+
   // 2. Weight resolution — actual vs volumetric, higher wins, rounded to 0.5kg
+  // Tracked separately (in addition to the merged `resolvedWeightKg` used for
+  // pricing) so adhoc-charge rules can key on the specific metric they need
+  // — see adhocCharge.service.js#computeMetrics.
   let resolvedWeightKg = weightKg ? parseFloat(weightKg) : null;
+  let actualWeightKg = weightKg ? parseFloat(weightKg) : null;
+  let volumetricWeightKg = null;
+  let dims = { lengthCm: customLength || null, widthCm: customWidth || null, heightCm: customHeight || null };
 
   if (!resolvedWeightKg && boxDimensionId) {
     const box = await prisma.boxDimension.findUnique({
@@ -421,7 +479,10 @@ async function calculateShippingCost({
         box.lengthCm,
         box.widthCm,
         box.heightCm,
+        volumetricDivisor,
       );
+      volumetricWeightKg = volWeight;
+      dims = { lengthCm: box.lengthCm, widthCm: box.widthCm, heightCm: box.heightCm };
       const perBoxWeight = Math.max(box.weightKgLimit, volWeight);
 
       // If `cartons` was also provided alongside a box selection, treat it
@@ -433,14 +494,27 @@ async function calculateShippingCost({
       // "No pricing available for zone X at Ykg".
       const boxQuantity = cartons ? Math.max(1, parseInt(cartons, 10)) : 1;
       resolvedWeightKg = perBoxWeight * boxQuantity;
+      actualWeightKg = box.weightKgLimit * boxQuantity;
     }
   }
 
   if (!resolvedWeightKg && customLength && customWidth && customHeight) {
-    resolvedWeightKg = calcVolumetricWeight(
+    volumetricWeightKg = calcVolumetricWeight(
       customLength,
       customWidth,
       customHeight,
+      volumetricDivisor,
+    );
+    resolvedWeightKg = volumetricWeightKg;
+  } else if (customLength && customWidth && customHeight && !volumetricWeightKg) {
+    // Dimensions provided alongside an explicit weightKg — still compute the
+    // volumetric figure for adhoc-rule metrics (VOLUME_CM3 / LONGEST_SIDE /
+    // VOLUMETRIC_WEIGHT), even though actual weight already won on price.
+    volumetricWeightKg = calcVolumetricWeight(
+      customLength,
+      customWidth,
+      customHeight,
+      volumetricDivisor,
     );
   }
 
@@ -456,12 +530,15 @@ async function calculateShippingCost({
 
   resolvedWeightKg = roundHalf(resolvedWeightKg);
 
-  // 3. Standard price band
+  // 3. Standard price band — [V1] now also scoped to shipment mode. Falls
+  // back to a mode-agnostic match only for legacy bands that predate V1 (see
+  // PriceBand.shipmentMode migration default of LAND).
   const priceBand =
     (await prisma.priceBand.findFirst({
       where: {
         zone,
         serviceType,
+        shipmentMode,
         isActive: true,
         minKg: { lte: resolvedWeightKg },
         OR: [{ maxKg: { gte: resolvedWeightKg } }, { maxKg: null }],
@@ -470,6 +547,7 @@ async function calculateShippingCost({
     (await prisma.priceBand.findFirst({
       where: {
         zone,
+        shipmentMode,
         isActive: true,
         minKg: { lte: resolvedWeightKg },
         OR: [{ maxKg: { gte: resolvedWeightKg } }, { maxKg: null }],
@@ -477,9 +555,11 @@ async function calculateShippingCost({
     }));
 
   if (!priceBand) {
+    // [V1 Feature 1] "Rate lookup includes the mode. If no rate exists:
+    // 404 'Rate not found for [mode]'."
     throw new ApiError(
-      400,
-      `No pricing available for zone ${zone} at ${resolvedWeightKg}kg`,
+      404,
+      `Rate not found for ${shipmentMode} — no pricing available for zone ${zone} at ${resolvedWeightKg}kg`,
     );
   }
 
@@ -512,7 +592,37 @@ async function calculateShippingCost({
     },
   );
 
-  // 7. Surcharges on top of discounted base price
+  // 7. [V1 Features 5/6] Adhoc charges — AUTO_APPLY rules matched against
+  // this parcel's measurements land on the total now; SUGGEST matches never
+  // affect price here (they only ever reach a customer after an admin
+  // decision — see adhocCharge.service.js). Rules are evaluated again (and
+  // persisted) by quote.controller.js once the Quote row exists, using the
+  // same measurements, so the numbers here and what gets saved always match.
+  const measurements = {
+    actualWeightKg,
+    volumetricWeightKg,
+    billableWeightKg: resolvedWeightKg,
+    lengthCm: dims.lengthCm,
+    widthCm: dims.widthCm,
+    heightCm: dims.heightCm,
+  };
+  const { autoApply: autoApplyAdhoc } = await evaluateRules({
+    shipmentMode,
+    measurements,
+    basePriceKobo: Math.round(finalBasePrice * 100),
+  });
+  const adhocChargesForSurcharge = autoApplyAdhoc.map((a) => ({
+    name: a.chargeType.name,
+    reason: a.reason,
+    amountNaira: a.amountKobo / 100,
+    vatApplicable: a.chargeType.vatApplicable,
+  }));
+  const adhocTotalNaira = adhocChargesForSurcharge.reduce(
+    (sum, a) => sum + a.amountNaira,
+    0,
+  );
+
+  // 8. Surcharges on top of discounted base price
   // Auto-calculate insuranceValue if requiresInsurance but no value provided.
   // Business rule: insure at 110% of the final base price (declared goods value estimate).
   const resolvedInsuranceValue =
@@ -525,6 +635,7 @@ async function calculateShippingCost({
       isFragile,
       requiresInsurance,
       insuranceValue: resolvedInsuranceValue,
+      adhocCharges: adhocChargesForSurcharge,
     });
 
   const total = finalBasePrice + totalSurcharge;
@@ -537,6 +648,12 @@ async function calculateShippingCost({
     zone,
     distanceKm,
     weightKg: resolvedWeightKg,
+    shipmentMode,
+    transitHours: modeSetting.transitHoursDefault,
+    // [V1] Exposed so callers that persist a Quote (quote.controller.js) can
+    // re-run the adhoc rule engine against the exact same measurements when
+    // writing ShipmentAdhocCharge rows, without recomputing weight/dims.
+    measurements,
     fromCity: {
       id: from.id,
       name: from.name,
@@ -554,6 +671,12 @@ async function calculateShippingCost({
     appliedDiscount, // null for guests/standard; discount details for enterprise/promo
     surchargeBreakdown,
     totalSurcharge,
+    // [V1] Adhoc charges as computed at this moment — for informational
+    // display before a Quote row exists (e.g. the /pricing/quote preview).
+    // The persisted, authoritative lines live on ShipmentAdhocCharge once a
+    // real Quote is generated via POST /quotes.
+    adhocCharges: adhocChargesForSurcharge,
+    adhocTotalNaira,
     total,
     currency: "NGN",
     deliveryEstimate, // { minDays, maxDays, label, source } — zone+service-aware, see getDeliveryEstimate
@@ -573,4 +696,6 @@ module.exports = {
   getContractRate,
   validatePromoCode,
   getDeliveryEstimate,
+  getModeSetting,
+  listModeSettings,
 };
