@@ -44,6 +44,7 @@ const adhocChargeRuleRoutes = require("./routes/adhocChargeRule.routes");
 const adhocSuggestionRoutes = require("./routes/adhocSuggestion.routes");
 const insuranceDisclaimerRoutes = require("./routes/insuranceDisclaimer.routes");
 const shipmentDraftRoutes = require("./routes/shipmentDraft.routes");
+const publicV1Routes = require("./routes/publicV1.routes");
 
 const app = express();
 
@@ -316,6 +317,8 @@ app.use("/api/v1/admin/adhoc-rules", adhocChargeRuleRoutes);
 app.use("/api/v1/admin/adhoc-suggestions", adhocSuggestionRoutes);
 app.use("/api/v1/admin/insurance-disclaimer", insuranceDisclaimerRoutes);
 app.use("/api/v1/shipment-drafts", shipmentDraftRoutes);
+// Public reads (modes, disclaimer) — must NOT live under /api/v1/admin, see publicV1.routes.js
+app.use("/api/v1", publicV1Routes);
 
 app.get("/", (req, res) => {
   res.status(200).json({
