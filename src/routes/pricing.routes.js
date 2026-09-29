@@ -182,6 +182,54 @@ router.get("/dimensions", pricingController.listDimensions);
  */
 router.get("/price-bands", pricingController.listPriceBands);
 
+/**
+ * @swagger
+ * /pricing/zone-matrix:
+ *   get:
+ *     summary: Browse city-to-city zone matrix (public)
+ *     tags: [Pricing]
+ *     security: []
+ *     description: >
+ *       Paginated view of city-pair zone assignments. Public and read-only —
+ *       the live quote flow calls this (with fromCity/toCity/exact=true) to
+ *       resolve a route's zone before any authentication exists.
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: fromCity
+ *         schema: { type: string }
+ *         description: Filter by origin city name
+ *       - in: query
+ *         name: toCity
+ *         schema: { type: string }
+ *         description: Filter by destination city name
+ *     responses:
+ *       200:
+ *         description: Zone matrix data returned
+ */
+router.get("/zone-matrix", pricingController.getZoneMatrix);
+
+/**
+ * @swagger
+ * /pricing/delivery-sla:
+ *   get:
+ *     summary: List delivery SLAs (zone × shipmentMode × serviceType)
+ *     tags: [Pricing]
+ *     security: []
+ *     parameters:
+ *       - { in: query, name: zone, schema: { type: integer } }
+ *       - { in: query, name: shipmentMode, schema: { type: string, enum: [AIR, LAND, SEA] } }
+ *       - { in: query, name: serviceType, schema: { type: string, enum: [EXPRESS, STANDARD, ECONOMY] } }
+ *     responses:
+ *       200: { description: SLA rows }
+ */
+router.get("/delivery-sla", deliverySLAController.listSLAs);
+
 // ─── Admin routes below ───────────────────────────────────────────────────────
 // PRD: only roles with canManageRates capability can write pricing data.
 // SUPER_ADMIN and LOGISTICS_MANAGER bypass capability checks automatically.
@@ -416,35 +464,6 @@ router.put("/price-bands/:id", pricingController.updatePriceBand);
  */
 router.delete("/price-bands/:id", pricingController.deletePriceBand);
 
-/**
- * @swagger
- * /pricing/zone-matrix:
- *   get:
- *     summary: Browse city-to-city zone matrix (Admin)
- *     tags: [Pricing]
- *     description: Paginated view of all city-pair zone assignments.
- *     parameters:
- *       - in: query
- *         name: page
- *         schema: { type: integer, default: 1 }
- *       - in: query
- *         name: limit
- *         schema: { type: integer, default: 20 }
- *       - in: query
- *         name: fromCity
- *         schema: { type: string }
- *         description: Filter by origin city name
- *       - in: query
- *         name: toCity
- *         schema: { type: string }
- *         description: Filter by destination city name
- *     responses:
- *       200:
- *         description: Zone matrix data returned
- *       403:
- *         description: Admin access required
- */
-router.get("/zone-matrix", pricingController.getZoneMatrix);
 
 /**
  * @swagger
@@ -617,20 +636,11 @@ router.post(
  *         description: Super Admin access required
  */
 
-// ─── Delivery SLA (zone × shipment mode × service type) ──────────────────────
+// ─── Delivery SLA (zone × shipment mode × service type) — mutations only;
+// GET is public and defined above the auth gate. ─────────────────────────────
 /**
  * @swagger
  * /pricing/delivery-sla:
- *   get:
- *     summary: List delivery SLAs (zone × shipmentMode × serviceType)
- *     tags: [Pricing]
- *     security: []
- *     parameters:
- *       - { in: query, name: zone, schema: { type: integer } }
- *       - { in: query, name: shipmentMode, schema: { type: string, enum: [AIR, LAND, SEA] } }
- *       - { in: query, name: serviceType, schema: { type: string, enum: [EXPRESS, STANDARD, ECONOMY] } }
- *     responses:
- *       200: { description: SLA rows }
  *   put:
  *     summary: Create or update the SLA for one zone + mode + service (Super Admin)
  *     tags: [Pricing]
@@ -652,7 +662,6 @@ router.post(
  *     responses:
  *       200: { description: Saved }
  */
-router.get("/delivery-sla", deliverySLAController.listSLAs);
 router.put(
   "/delivery-sla",
   authenticate,
