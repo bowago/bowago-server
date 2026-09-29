@@ -568,6 +568,10 @@ async function getShipment(req, res) {
       toCity: { select: { id: true, name: true, region: true, state: true } },
       trackingHistory: { orderBy: { createdAt: "asc" } },
       documents: true,
+      // Staff-only signal: has the automatic SLA-breach sweep already
+      // alerted this customer? See SHIPMENT_LIST_INCLUDE for the same field
+      // on the list endpoints.
+      delayAlert: { select: { id: true, alertedAt: true, reason: true } },
       // Pricing mode (STANDARD/CONTRACT/PROMO) and discount info were computed
       // at quote time and live on the linked Quote row — the Shipment table
       // itself only stores the final quotedPrice with no breakdown of *why*
@@ -1292,6 +1296,10 @@ const SHIPMENT_LIST_INCLUDE = {
     select: { id: true },
     take: 1,
   },
+  // Staff-only signal: has the automatic SLA-breach sweep already alerted
+  // this customer? Lets the "Expected Delivery" indicator avoid implying a
+  // fresh, unhandled breach when one was already sent.
+  delayAlert: { select: { id: true, alertedAt: true, reason: true } },
 };
 
 // Strips the raw addressChangeReqs array down to a simple boolean the

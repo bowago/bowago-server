@@ -94,6 +94,10 @@ async function getDelayedShipments(req, res) {
     },
     include: {
       customer: { select: { firstName: true, lastName: true, email: true } },
+      // Lets the admin see which of these were already caught by the
+      // automatic sweep (slaBreachScheduler.service.js) vs. are freshly
+      // overdue and still need a first notification.
+      delayAlert: { select: { id: true, alertedAt: true, reason: true } },
     },
     orderBy: { estimatedDelivery: "asc" },
   });
