@@ -1,5 +1,6 @@
 const { prisma } = require("../config/db");
 const { ApiError } = require("../utils/ApiError");
+const { normalizeContract, findContractConflict, describeScope } = require("../services/pricing/contractRules");
 const {
   success,
   created,
@@ -7,81 +8,40 @@ const {
   buildMeta,
 } = require("../utils/helpers");
 
-// ─── Admin: Create/assign contract rate to a user ─────────────────────────────
+// ─── Admin: Create a contract rate for a user ─────────────────────────────────
+// A user may hold several contracts (e.g. one per mode). Each has an explicit
+// scope — mode (empty = all modes) and service (empty = all services) — and two
+// active contracts for the same user may not claim the same product in the
+// same period. (This used to be an upsert that silently replaced the user's
+// single, mode-less contract.)
 async function createContractRate(req, res) {
-  const {
-    userId,
-    label,
-    serviceType,
-    discountPercent,
-    fixedPricePerKgByZone,
-    isActive,
-    validFrom,
-    validUntil,
-    notes,
-  } = req.body;
+  const { userId } = req.body;
 
-  // Verify user exists
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { id: true, firstName: true, lastName: true, email: true },
   });
   if (!user) throw new ApiError(404, "User not found");
 
-  const hasDiscount = discountPercent !== undefined && discountPercent !== null;
-  const hasFixed =
-    fixedPricePerKgByZone !== undefined && fixedPricePerKgByZone !== null;
-
-  if (!hasDiscount && !hasFixed) {
+  const data = normalizeContract(req.body);
+  const existing = await prisma.contractRate.findMany({ where: { userId, isActive: true } });
+  const clash = findContractConflict(data, existing);
+  if (clash) {
     throw new ApiError(
-      400,
-      "Provide either discountPercent or fixedPricePerKgByZone",
-    );
-  }
-  if (hasDiscount && hasFixed) {
-    throw new ApiError(
-      400,
-      "Provide either discountPercent OR fixedPricePerKgByZone, not both",
+      409,
+      `This user already has an active contract covering ${describeScope(clash)} in an overlapping period. Edit that contract, or narrow the scope/validity of this one.`,
     );
   }
 
-  // Upsert — each user can only have one contract rate
-  const contractRate = await prisma.contractRate.upsert({
-    where: { userId },
-    update: {
-      label,
-      serviceType: serviceType || null,
-      discountPercent: hasDiscount ? discountPercent : null,
-      fixedPricePerKgByZone: hasFixed ? fixedPricePerKgByZone : null,
-      isActive: isActive !== undefined ? isActive : true,
-      validFrom: validFrom ? new Date(validFrom) : null,
-      validUntil: validUntil ? new Date(validUntil) : null,
-      notes,
-      createdBy: req.user.id,
-    },
-    create: {
-      userId,
-      label,
-      serviceType: serviceType || null,
-      discountPercent: hasDiscount ? discountPercent : null,
-      fixedPricePerKgByZone: hasFixed ? fixedPricePerKgByZone : null,
-      isActive: isActive !== undefined ? isActive : true,
-      validFrom: validFrom ? new Date(validFrom) : null,
-      validUntil: validUntil ? new Date(validUntil) : null,
-      notes,
-      createdBy: req.user.id,
-    },
-    include: {
-      user: {
-        select: { id: true, firstName: true, lastName: true, email: true },
-      },
-    },
+  const contractRate = await prisma.contractRate.create({
+    data: { ...data, userId, createdBy: req.user.id },
+    include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } },
   });
 
   return created(
     res,
     { contractRate },
-    `Contract rate assigned to ${user.firstName} ${user.lastName}`,
+    `Contract rate (${describeScope(contractRate)}) assigned to ${user.firstName} ${user.lastName}`,
   );
 }
 
@@ -148,43 +108,34 @@ async function getContractRate(req, res) {
 }
 
 // ─── Admin: Update contract rate ──────────────────────────────────────────────
+const CONTRACT_EDITABLE = [
+  "label", "shipmentMode", "serviceType", "discountPercent", "fixedPricePerKgByZone",
+  "isActive", "validFrom", "validUntil", "notes",
+];
+
 async function updateContractRate(req, res) {
   const { id } = req.params;
   const existing = await prisma.contractRate.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, "Contract rate not found");
 
-  const {
-    label,
-    serviceType,
-    discountPercent,
-    fixedPricePerKgByZone,
-    isActive,
-    validFrom,
-    validUntil,
-    notes,
-  } = req.body;
+  const patch = Object.fromEntries(Object.entries(req.body).filter(([k]) => CONTRACT_EDITABLE.includes(k)));
+  // Switching pricing type must clear the other side.
+  if (patch.fixedPricePerKgByZone && patch.discountPercent === undefined) patch.discountPercent = null;
+  if (patch.discountPercent !== undefined && patch.discountPercent !== null && patch.fixedPricePerKgByZone === undefined) {
+    patch.fixedPricePerKgByZone = null;
+  }
+
+  const data = normalizeContract({ ...existing, ...patch });
+  const others = await prisma.contractRate.findMany({ where: { userId: existing.userId, isActive: true } });
+  const clash = findContractConflict(data, others, { ignoreId: id });
+  if (clash) {
+    throw new ApiError(409, `Another active contract for this user already covers ${describeScope(clash)} in an overlapping period.`);
+  }
 
   const rate = await prisma.contractRate.update({
     where: { id },
-    data: {
-      ...(label !== undefined && { label }),
-      ...(serviceType !== undefined && { serviceType: serviceType || null }),
-      ...(discountPercent !== undefined && { discountPercent }),
-      ...(fixedPricePerKgByZone !== undefined && { fixedPricePerKgByZone }),
-      ...(isActive !== undefined && { isActive }),
-      ...(validFrom !== undefined && {
-        validFrom: validFrom ? new Date(validFrom) : null,
-      }),
-      ...(validUntil !== undefined && {
-        validUntil: validUntil ? new Date(validUntil) : null,
-      }),
-      ...(notes !== undefined && { notes }),
-    },
-    include: {
-      user: {
-        select: { id: true, firstName: true, lastName: true, email: true },
-      },
-    },
+    data,
+    include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } },
   });
 
   return success(res, { contractRate: rate }, "Contract rate updated");
@@ -201,14 +152,15 @@ async function deleteContractRate(req, res) {
   return success(res, {}, "Contract rate deleted");
 }
 
-// ─── Customer: Get my contract rate (if any) ─────────────────────────────────
+// ─── Customer: Get my contract rate(s) (if any) ──────────────────────────────
 async function getMyContractRate(req, res) {
-  const rate = await prisma.contractRate.findUnique({
-    where: { userId: req.user.id },
+  const rates = await prisma.contractRate.findMany({
+    where: { userId: req.user.id, isActive: true },
+    orderBy: { createdAt: "asc" },
   });
 
-  if (!rate || !rate.isActive) {
-    return success(res, { contractRate: null, hasContract: false });
+  if (rates.length === 0) {
+    return success(res, { contractRate: null, contractRates: [], hasContract: false });
   }
 
   // Security audit log — viewing own rate card
@@ -217,14 +169,15 @@ async function getMyContractRate(req, res) {
       userId: req.user.id,
       action: "VIEW_CONTRACT_RATE",
       resource: "ContractRate",
-      resourceId: rate.id,
+      resourceId: rates[0].id,
     },
   });
 
   return success(res, {
-    contractRate: rate,
+    contractRate: rates[0], // first one, kept for older clients
+    contractRates: rates,
     hasContract: true,
-    discountType: rate.discountPercent ? "PERCENT" : "FIXED_PER_ZONE",
+    discountType: rates[0].discountPercent ? "PERCENT" : "FIXED_PER_ZONE",
   });
 }
 

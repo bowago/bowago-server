@@ -1,33 +1,34 @@
 /**
- * seed-mode-rates.js
+ * seed-mode-rates.js  —  BOOTSTRAP data for AIR / SEA offerings.
  *
- * [V1 Feature 1] Every existing PriceBand became `shipmentMode: LAND` by
- * default when the column was added (that's what all pre-V1 rates were,
- * in practice). But AIR and SEA now have zero bands of their own, so any
- * quote requesting those modes 404s with "Rate not found for AIR/SEA"
- * until an admin creates real ones.
+ * Multipliers are allowed here (and only here): production pricing is managed
+ * independently per mode / service / zone / weight band in Rate Management.
+ * Everything this script creates is a STARTING POINT for an admin to review.
  *
- * This script seeds a starter set of AIR and SEA bands by cloning every
- * active LAND band and applying a multiplier — AIR costs more (faster),
- * SEA costs less (slower). THESE ARE PLACEHOLDER RATIOS, not real pricing —
- * an admin should review and correct them via the Rate Management UI
- * (or POST /pricing/price-bands with shipmentMode) before relying on them
- * for real quotes. This just gets the platform off the ground for AIR/SEA
- * instead of hard-404ing on day one.
- *
- * Idempotent: skips a (zone, serviceType, minKg, maxKg, mode) combination
- * that already has a band, so it's safe to re-run after an admin has
- * started editing real AIR/SEA rates.
+ * What changed vs the old script:
+ *   - It no longer clones a LAND band into every service of every mode. Only
+ *     combinations BowaGO actually operates (OPERATED below, editable) are
+ *     defined as offerings, so e.g. SEA + EXPRESS never comes into existence.
+ *   - Cloned bands are created INACTIVE unless --activate is passed, so a
+ *     placeholder multiplier can never silently become a live price.
+ *   - Placeholder (₦0) source bands are skipped.
+ *   - SLAs are optional (--bootstrap-sla) and derived from the LAND SLA of the
+ *     same zone+service using explicit day scales; they are ordinary SLA rows
+ *     in the admin UI and must be reviewed.
  *
  * Usage:
- *   node prisma/seed-mode-rates.js
- *   node prisma/seed-mode-rates.js --dry-run
- *   node prisma/seed-mode-rates.js --air-multiplier=3 --sea-multiplier=0.6
+ *   node prisma/seed-mode-rates.js                       # dry run (default)
+ *   node prisma/seed-mode-rates.js --apply
+ *   node prisma/seed-mode-rates.js --apply --activate --bootstrap-sla
+ *   node prisma/seed-mode-rates.js --apply --air-multiplier=3 --sea-multiplier=0.6
+ *   node prisma/seed-mode-rates.js --apply --air-days=0.5 --sea-days=2.5
  */
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
-const DRY_RUN = process.argv.includes("--dry-run");
+const APPLY = process.argv.includes("--apply");
+const ACTIVATE = process.argv.includes("--activate");
+const BOOTSTRAP_SLA = process.argv.includes("--bootstrap-sla");
 
 function argNumber(flag, fallback) {
   const found = process.argv.find((a) => a.startsWith(`--${flag}=`));
@@ -36,50 +37,73 @@ function argNumber(flag, fallback) {
   return Number.isNaN(val) ? fallback : val;
 }
 
-// Typical real-world ratios relative to land freight — placeholders only.
-const AIR_MULTIPLIER = argNumber("air-multiplier", 2.5);
-const SEA_MULTIPLIER = argNumber("sea-multiplier", 0.6);
+// Bootstrap ratios relative to LAND. Placeholders — an admin sets real values.
+const RATE_MULTIPLIER = { AIR: argNumber("air-multiplier", 2.5), SEA: argNumber("sea-multiplier", 0.6) };
+const DAY_SCALE = { AIR: argNumber("air-days", 0.5), SEA: argNumber("sea-days", 2.5) };
+
+// The products BowaGO operates. NOT every mode x service pair — edit to match
+// the business. This script only bootstraps rates/SLAs for the non-LAND ones.
+const OPERATED = [
+  { mode: "AIR", service: "EXPRESS" },
+  { mode: "AIR", service: "STANDARD" },
+  { mode: "LAND", service: "EXPRESS" },
+  { mode: "LAND", service: "STANDARD" },
+  { mode: "LAND", service: "ECONOMY" },
+  { mode: "SEA", service: "STANDARD" },
+  { mode: "SEA", service: "ECONOMY" },
+];
+
+const MODE_LABEL = { AIR: "Air", LAND: "Land", SEA: "Sea" };
+const SERVICE_LABEL = { EXPRESS: "Express", STANDARD: "Standard", ECONOMY: "Economy" };
+
+const usable = (b) =>
+  (b.pricePerKg && b.pricePerKg > 0) ||
+  (b.basePrice && b.basePrice > 0) ||
+  (b.fixedPricePerKgByZone && Object.values(b.fixedPricePerKgByZone).some((v) => Number(v) > 0));
+
+const round2 = (n) => Math.round(n * 100) / 100;
 
 async function main() {
-  const landBands = await prisma.priceBand.findMany({
-    where: { shipmentMode: "LAND", isActive: true },
-  });
+  console.log(APPLY ? "MODE: APPLY\n" : "MODE: DRY RUN — pass --apply to write\n");
 
-  if (landBands.length === 0) {
-    console.log("No active LAND price bands found — nothing to clone from.");
-    return;
+  // 1. Offerings
+  const existingOfferings = await prisma.serviceOffering.findMany();
+  const have = new Set(existingOfferings.map((o) => `${o.shipmentMode}|${o.serviceType}`));
+  const newOfferings = OPERATED.filter((o) => !have.has(`${o.mode}|${o.service}`)).map((o, i) => ({
+    shipmentMode: o.mode,
+    serviceType: o.service,
+    displayName: `${MODE_LABEL[o.mode]} ${SERVICE_LABEL[o.service]}`,
+    // Inactive until rates + SLA are reviewed; the admin activates it.
+    isActive: false,
+    sortOrder: 100 + i,
+    notes: "Bootstrapped by seed-mode-rates — review rates and SLA, then activate.",
+  }));
+  console.log(`Offerings to define: ${newOfferings.length}`);
+  newOfferings.forEach((o) => console.log(`  + ${o.shipmentMode} + ${o.serviceType} (inactive)`));
+  if (APPLY && newOfferings.length) {
+    await prisma.serviceOffering.createMany({ data: newOfferings, skipDuplicates: true });
   }
 
-  console.log(`Found ${landBands.length} active LAND band(s).`);
-  console.log(`AIR multiplier: ${AIR_MULTIPLIER}x, SEA multiplier: ${SEA_MULTIPLIER}x`);
-  if (DRY_RUN) console.log("(dry run — no writes will be made)\n");
+  // 2. Bands cloned from LAND for defined non-LAND offerings
+  const landBands = await prisma.priceBand.findMany({ where: { shipmentMode: "LAND", isActive: true } });
+  const sourceBands = landBands.filter(usable);
+  console.log(`\nUsable active LAND bands: ${sourceBands.length} (skipped ${landBands.length - sourceBands.length} unpriced)`);
 
-  const plan = [];
-  for (const band of landBands) {
-    for (const [mode, multiplier] of [["AIR", AIR_MULTIPLIER], ["SEA", SEA_MULTIPLIER]]) {
-      const existing = await prisma.priceBand.findFirst({
-        where: {
-          shipmentMode: mode,
-          zone: band.zone,
-          serviceType: band.serviceType,
-          minKg: band.minKg,
-          maxKg: band.maxKg,
-        },
+  const bandPlan = [];
+  for (const { mode, service } of OPERATED.filter((o) => o.mode !== "LAND")) {
+    const mult = RATE_MULTIPLIER[mode];
+    for (const band of sourceBands.filter((b) => b.serviceType === service)) {
+      const exists = await prisma.priceBand.findFirst({
+        where: { shipmentMode: mode, serviceType: service, zone: band.zone, minKg: band.minKg, maxKg: band.maxKg },
       });
-      if (existing) continue; // already has a band for this slot — leave it alone
-
-      plan.push({
+      if (exists) continue;
+      bandPlan.push({
         label: band.label ? `${band.label} (${mode})` : null,
         zone: band.zone,
-        pricePerKg: band.pricePerKg != null ? Math.round(band.pricePerKg * multiplier * 100) / 100 : null,
-        basePrice: band.basePrice != null ? Math.round(band.basePrice * multiplier * 100) / 100 : null,
+        pricePerKg: band.pricePerKg != null ? round2(band.pricePerKg * mult) : null,
+        basePrice: band.basePrice != null ? round2(band.basePrice * mult) : null,
         fixedPricePerKgByZone: band.fixedPricePerKgByZone
-          ? Object.fromEntries(
-              Object.entries(band.fixedPricePerKgByZone).map(([z, price]) => [
-                z,
-                Math.round(Number(price) * multiplier * 100) / 100,
-              ]),
-            )
+          ? Object.fromEntries(Object.entries(band.fixedPricePerKgByZone).map(([z, p]) => [z, round2(Number(p) * mult)]))
           : null,
         minKg: band.minKg,
         maxKg: band.maxKg,
@@ -87,45 +111,54 @@ async function main() {
         maxTons: band.maxTons,
         minCartons: band.minCartons,
         maxCartons: band.maxCartons,
-        discountPercent: band.discountPercent,
-        serviceType: band.serviceType,
+        serviceType: service,
         shipmentMode: mode,
         validFrom: band.validFrom,
         validUntil: band.validUntil,
-        notes: `Auto-seeded from LAND band ${band.id} at ${multiplier}x — review and correct.`,
-        isActive: true,
-        createdBy: null,
+        notes: `BOOTSTRAP: ${mult}x LAND band ${band.id}. Review and correct before relying on it.`,
+        isActive: ACTIVATE,
       });
     }
   }
+  console.log(`Bands to create: ${bandPlan.length} (${ACTIVATE ? "ACTIVE" : "inactive"})`);
+  if (APPLY && bandPlan.length) await prisma.priceBand.createMany({ data: bandPlan });
 
-  if (plan.length === 0) {
-    console.log("Nothing to seed — every LAND band already has AIR/SEA equivalents.");
-    return;
+  // 3. SLAs (optional)
+  if (BOOTSTRAP_SLA) {
+    const landSlas = await prisma.deliverySLA.findMany({ where: { shipmentMode: "LAND" } });
+    const slaPlan = [];
+    for (const { mode, service } of OPERATED.filter((o) => o.mode !== "LAND")) {
+      const scale = DAY_SCALE[mode];
+      for (const l of landSlas.filter((s) => s.serviceType === service)) {
+        const exists = await prisma.deliverySLA.findFirst({
+          where: { zone: l.zone, shipmentMode: mode, serviceType: service },
+        });
+        if (exists) continue;
+        const minDays = Math.max(1, Math.round(l.minDays * scale));
+        const maxDays = Math.max(minDays, Math.ceil(l.maxDays * scale));
+        slaPlan.push({
+          zone: l.zone,
+          shipmentMode: mode,
+          serviceType: service,
+          minDays,
+          maxDays,
+          label: minDays === maxDays ? `${minDays} business day${minDays === 1 ? "" : "s"}` : `${minDays}–${maxDays} business days`,
+        });
+      }
+    }
+    console.log(`\nSLAs to create (bootstrap, x${DAY_SCALE.AIR} air / x${DAY_SCALE.SEA} sea of LAND): ${slaPlan.length}`);
+    slaPlan.slice(0, 20).forEach((s) => console.log(`  + zone ${s.zone} ${s.shipmentMode} ${s.serviceType}: ${s.label}`));
+    if (APPLY && slaPlan.length) await prisma.deliverySLA.createMany({ data: slaPlan, skipDuplicates: true });
+  } else {
+    console.log("\n(SLAs not bootstrapped — pass --bootstrap-sla, or enter AIR/SEA SLAs in Admin > Rates > Delivery SLA)");
   }
 
-  console.log(`Will create ${plan.length} new band(s):`);
-  for (const p of plan) {
-    console.log(
-      `  [${p.shipmentMode}] zone=${p.zone ?? "multi"} ${p.serviceType} ${p.minKg}-${p.maxKg ?? "∞"}kg → ` +
-        `pricePerKg=${p.pricePerKg ?? "—"} basePrice=${p.basePrice ?? "—"}`,
-    );
-  }
-
-  if (DRY_RUN) {
-    console.log("\nDry run — no rows created.");
-    return;
-  }
-
-  await prisma.priceBand.createMany({ data: plan });
-  console.log(`\nDone — created ${plan.length} band(s). Review them in Rate Management before going live.`);
+  console.log(APPLY ? "\nDone. Review everything in Admin > Rates before activating offerings." : "\nDry run complete.");
 }
 
 main()
-  .catch((err) => {
-    console.error(err);
+  .catch((e) => {
+    console.error(e);
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .finally(() => prisma.$disconnect());

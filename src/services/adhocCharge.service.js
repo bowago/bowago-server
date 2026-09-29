@@ -114,14 +114,14 @@ async function getActiveRules() {
  * { rule, chargeType, amountKobo, reason }. A charge type already present in
  * `excludeChargeTypeIds` is skipped (never applied twice to one shipment).
  */
-async function evaluateRules({
+function evaluateRulesSync({
   shipmentMode,
   measurements,
   basePriceKobo,
   excludeChargeTypeIds = [],
+  rules,
 }) {
   const metrics = computeMetrics(measurements);
-  const rules = await getActiveRules();
 
   const autoApply = [];
   const suggested = [];
@@ -150,6 +150,21 @@ async function evaluateRules({
 
   return { autoApply, suggested };
 }
+
+// Async wrapper: loads the active rules unless the caller already has them
+// (the pricing engine preloads once and evaluates per offering).
+async function evaluateRules({ rules, ...rest }) {
+  return evaluateRulesSync({ ...rest, rules: rules || (await getActiveRules()) });
+}
+
+// ─── VAT rate (single source: the active VAT row in Surcharges) ──────────────
+// Ad-hoc lines used to hard-code 7.5%. The rate now comes from the same VAT
+// surcharge row the quote engine uses, so the two can never drift apart.
+async function getVatRatePercent() {
+  const row = await prisma.surcharge.findFirst({ where: { type: "VAT", isActive: true } });
+  return row?.ratePercent ?? 0;
+}
+const vatKoboOn = (amountKobo, ratePercent) => Math.round(amountKobo * ((ratePercent || 0) / 100));
 
 function describeMetric(metric) {
   return (
@@ -181,53 +196,31 @@ function describeThreshold(rule) {
  * status SUGGESTED so they show up in the admin queue, but contribute
  * nothing to the customer's total until an admin decides.
  */
-async function applyAdhocChargesAtQuote({
-  quoteId,
-  shipmentMode,
-  measurements,
-  basePriceKobo,
-}) {
-  const { autoApply, suggested } = await evaluateRules({
-    shipmentMode,
-    measurements,
-    basePriceKobo,
-  });
-
-  const toCreate = [...autoApply, ...suggested].map((entry) => ({
+// Pure: the ShipmentAdhocCharge rows for a quote, from an engine evaluation.
+function buildAdhocRows({ quoteId, autoApply, suggested, vatRatePercent }) {
+  const rowFor = (entry, status) => ({
     quoteId,
     chargeTypeId: entry.chargeType.id,
-    ruleId: entry.rule.id,
+    ruleId: entry.rule?.id || null,
     nameSnapshot: entry.chargeType.name,
     reason: entry.reason,
     amountKobo: entry.amountKobo,
-    vatKobo: entry.chargeType.vatApplicable
-      ? Math.round(entry.amountKobo * 0.075)
-      : 0,
-    status: entry.rule.behaviour === "AUTO_APPLY" ? "APPLIED" : "SUGGESTED",
-  }));
+    vatKobo: entry.chargeType.vatApplicable ? vatKoboOn(entry.amountKobo, vatRatePercent) : 0,
+    status,
+  });
+  return [
+    ...autoApply.map((e) => rowFor(e, "APPLIED")),
+    ...suggested.map((e) => rowFor(e, "SUGGESTED")),
+  ];
+}
 
-  if (toCreate.length > 0) {
-    await prisma.shipmentAdhocCharge.createMany({ data: toCreate });
-  }
-
-  const appliedTotalKobo = autoApply.reduce((sum, e) => sum + e.amountKobo, 0);
-  const appliedTaxableKobo = autoApply.reduce(
-    (sum, e) => sum + (e.chargeType.vatApplicable ? e.amountKobo : 0),
-    0,
-  );
-
-  return {
-    appliedTotalKobo,
-    appliedTaxableKobo,
-    lines: autoApply.map((e) => ({
-      chargeTypeId: e.chargeType.id,
-      name: e.chargeType.name,
-      reason: e.reason,
-      amountKobo: e.amountKobo,
-      vatApplicable: e.chargeType.vatApplicable,
-    })),
-    suggestedCount: suggested.length,
-  };
+// Convenience (non-transactional) persistence. The quote flow uses
+// buildAdhocRows inside a transaction instead, so a failure can never leave a
+// total that includes a charge with no line behind it.
+async function applyAdhocChargesAtQuote({ quoteId, autoApply, suggested, vatRatePercent }) {
+  const rows = buildAdhocRows({ quoteId, autoApply, suggested, vatRatePercent: vatRatePercent ?? (await getVatRatePercent()) });
+  if (rows.length > 0) await prisma.shipmentAdhocCharge.createMany({ data: rows });
+  return { rows, appliedTotalKobo: autoApply.reduce((a, e) => a + e.amountKobo, 0), suggestedCount: suggested.length };
 }
 
 /**
@@ -253,6 +246,7 @@ async function reEvaluateAtWeighIn({ shipmentId, shipmentMode, measurements, bas
     excludeChargeTypeIds,
   });
 
+  const vatRate = await getVatRatePercent();
   if (suggested.length > 0) {
     await prisma.shipmentAdhocCharge.createMany({
       data: suggested.map((e) => ({
@@ -262,7 +256,7 @@ async function reEvaluateAtWeighIn({ shipmentId, shipmentMode, measurements, bas
         nameSnapshot: e.chargeType.name,
         reason: e.reason,
         amountKobo: e.amountKobo,
-        vatKobo: e.chargeType.vatApplicable ? Math.round(e.amountKobo * 0.075) : 0,
+        vatKobo: e.chargeType.vatApplicable ? vatKoboOn(e.amountKobo, vatRate) : 0,
         status: "SUGGESTED",
       })),
     });
@@ -276,6 +270,11 @@ module.exports = {
   ruleMatches,
   computeChargeAmountKobo,
   evaluateRules,
+  evaluateRulesSync,
+  getActiveRules,
+  getVatRatePercent,
+  vatKoboOn,
+  buildAdhocRows,
   applyAdhocChargesAtQuote,
   reEvaluateAtWeighIn,
   describeMetric,

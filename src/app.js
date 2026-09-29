@@ -39,6 +39,7 @@ const promoCodeRoutes = require("./routes/promoCode.routes");
 // [V1 Launch Scope] Mode of shipment, adhoc charges/rules/suggestions,
 // insurance disclaimer, and the review-before-create shipment draft flow.
 const shipmentModeRoutes = require("./routes/shipmentMode.routes");
+const offeringRoutes = require("./routes/offering.routes");
 const adhocChargeRoutes = require("./routes/adhocCharge.routes");
 const adhocChargeRuleRoutes = require("./routes/adhocChargeRule.routes");
 const adhocSuggestionRoutes = require("./routes/adhocSuggestion.routes");
@@ -312,6 +313,7 @@ app.use("/api/v1/policies", policyRoutes);
 app.use("/api/v1/promo-codes", promoCodeRoutes);
 // [V1 Launch Scope]
 app.use("/api/v1/admin/shipment-modes", shipmentModeRoutes);
+app.use("/api/v1/admin/offerings", offeringRoutes);
 app.use("/api/v1/admin/adhoc-charges", adhocChargeRoutes);
 app.use("/api/v1/admin/adhoc-rules", adhocChargeRuleRoutes);
 app.use("/api/v1/admin/adhoc-suggestions", adhocSuggestionRoutes);

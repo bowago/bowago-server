@@ -1,7 +1,7 @@
 {
   "name": "bowago-backend",
   "version": "1.0.0",
-  "description": "BowaGO Logistics Platform — Backend API",
+  "description": "BowaGO Logistics Platform \u2014 Backend API",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -12,7 +12,8 @@
     "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
     "seed": "node prisma/seed.js",
-    "seed:mode-rates": "node prisma/seed-mode-rates.js"
+    "seed:mode-rates": "node prisma/seed-mode-rates.js",
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "Calstins Ltd",

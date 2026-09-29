@@ -16,6 +16,21 @@ const BRAND = {
 };
 
 // ─── Helper: format currency ──────────────────────────────────────────────────
+// ─── Pricing lines that always sum to the total ────────────────────────────
+// shipment.quotedPrice is the ALL-IN total (base + surcharges + ad-hoc +
+// insurance + tax). The shipping/base line must therefore be derived, never
+// shown as quotedPrice with the surcharge lines added on top again (which
+// double-counted them). The locked pricing snapshot gives the exact base;
+// legacy shipments (no snapshot) derive it as total − Σ(lines).
+function derivePricing(shipment, lines) {
+  const list = Array.isArray(lines) ? lines : [];
+  const total = Number(shipment.quotedPrice) || 0;
+  const linesTotal = list.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
+  const snapBase = shipment.pricingSnapshot?.components?.finalBasePrice;
+  const base = typeof snapBase === "number" ? snapBase : Math.round((total - linesTotal) * 100) / 100;
+  return { base, lines: list, linesTotal: Math.round(linesTotal * 100) / 100, total };
+}
+
 function formatNaira(amount) {
   // PDFKit uses Helvetica by default which does not include the ₦ (Naira)
   // Unicode character — it renders as a broken glyph. We use "NGN " prefix
@@ -269,14 +284,15 @@ async function generateInvoicePDF(data) {
       .text("DETAILS", 250, tableY + 6)
       .text("AMOUNT", 450, tableY + 6, { align: "right", width: 90 });
 
+    const pricing = derivePricing(shipment, surchargeBreakdown);
     let rowY = tableY + 28;
     const rows = [
       {
         desc: `Shipping — ${shipment.senderCity} → ${shipment.recipientCity}`,
         detail: `Zone ${shipment.zone} | ${shipment.weight}kg | ${shipment.serviceType || "STANDARD"} | ${shipment.shipmentMode || "LAND"}`,
-        amount: shipment.quotedPrice,
+        amount: pricing.base,
       },
-      ...(surchargeBreakdown || []).map((s) => ({
+      ...pricing.lines.map((s) => ({
         desc: s.label,
         detail: s.description || "",
         amount: s.amount,
@@ -313,17 +329,14 @@ async function generateInvoicePDF(data) {
     doc.y += 10;
 
     // ─── Totals ───────────────────────────────────────────────────────────────
-    const subtotal = shipment.quotedPrice;
-    const surchargeTotal = (surchargeBreakdown || []).reduce(
-      (sum, s) => sum + s.amount,
-      0,
-    );
-    const total = subtotal + surchargeTotal;
+    const subtotal = pricing.base;
+    const surchargeTotal = pricing.linesTotal;
+    const total = pricing.total;
 
     twoCol(doc, "Subtotal", formatNaira(subtotal), doc.y);
     doc.y += 16;
     if (surchargeTotal > 0) {
-      twoCol(doc, "Total Surcharges", formatNaira(surchargeTotal), doc.y);
+      twoCol(doc, "Surcharges, charges & taxes", formatNaira(surchargeTotal), doc.y);
       doc.y += 16;
     }
     drawRule(doc, doc.y + 5, BRAND.orange);
@@ -736,19 +749,13 @@ async function generateBookingConfirmationPDF(data) {
       .text("Pricing Breakdown", 50, doc.y);
     doc.y += 18;
 
-    twoCol(
-      doc,
-      "Base Shipping Price",
-      formatNaira(shipment.quotedPrice),
-      doc.y,
-    );
+    const bookingPricing = derivePricing(shipment, quote?.surchargeBreakdown);
+    twoCol(doc, "Base Shipping Price", formatNaira(bookingPricing.base), doc.y);
     doc.y += 16;
 
-    if (quote?.surchargeBreakdown?.length > 0) {
-      for (const s of quote.surchargeBreakdown) {
-        twoCol(doc, s.label, formatNaira(s.amount), doc.y);
-        doc.y += 14;
-      }
+    for (const s of bookingPricing.lines) {
+      twoCol(doc, s.label, formatNaira(s.amount), doc.y);
+      doc.y += 14;
     }
 
     drawRule(doc, doc.y + 5, BRAND.orange);
@@ -756,7 +763,7 @@ async function generateBookingConfirmationPDF(data) {
     twoCol(
       doc,
       "TOTAL QUOTED PRICE",
-      formatNaira(shipment.quotedPrice),
+      formatNaira(bookingPricing.total),
       doc.y,
       BRAND.dark,
       BRAND.orange,

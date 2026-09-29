@@ -84,6 +84,7 @@ function errorHandler(err, req, res, next) {
     return res.status(statusCode).json({
       success: false,
       message: err.message || "Internal Server Error",
+      ...(err.code && { code: err.code }),
       ...(err.errors && { errors: err.errors }),
     });
   }

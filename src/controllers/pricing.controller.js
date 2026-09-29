@@ -1,5 +1,5 @@
 const XLSX = require('xlsx');
-const { getEstimatedDelivery } = require('./deliverySLA.controller');
+const { normalizeBand, findConflict } = require('../services/pricing/bandRules');
 const { prisma } = require('../config/db');
 const { assertModeActive, calculateShippingCost } = require('../services/pricing.service');
 const { ApiError } = require('../utils/ApiError');
@@ -69,14 +69,14 @@ async function getQuote(req, res) {
 
   const userId = req.user?.id || null;
 
-  await assertModeActive(shipmentMode || 'LAND');
-
   const quote = await calculateShippingCost({
     fromCity, toCity,
     weightKg, tons, cartons,
     boxDimensionId, customLength, customWidth, customHeight,
-    serviceType: serviceType || 'STANDARD',
-    shipmentMode: shipmentMode || 'LAND',
+    // No silent defaults — the engine rejects a request that does not name
+    // both the mode and the service it is pricing.
+    serviceType,
+    shipmentMode,
     isFragile: !!isFragile,
     requiresInsurance: !!wantsInsurance,
     insuranceValue: wantsInsurance ? (resolvedDeclared || 0) : 0,
@@ -277,56 +277,40 @@ async function listPriceBands(req, res) {
 }
 
 // ─── createPriceBand ──────────────────────────────────────────────────────────
-// Supports two modes:
-//   Mode A — single-zone row: { zone, pricePerKg, serviceType, minKg, ... }
-//   Mode B — multi-zone map:  { fixedPricePerKgByZone: {"1":150,"2":200}, serviceType, label, ... }
-// If the frontend sends fixedPricePerKgByZone it is stored as JSON; zone field is left null.
-// serviceType is required by the frontend; defaults to STANDARD if omitted.
+// A rate must unambiguously identify its product (mode + service), its zone(s),
+// a weight range and a real price. Two active rates may not price the same
+// thing, and a rate can only be created for a DEFINED offering.
+//   Single-zone row:  { zone, pricePerKg | basePrice, shipmentMode, serviceType, minKg, maxKg }
+//   Multi-zone row:   { fixedPricePerKgByZone: {"1":150,"2":200}, shipmentMode, serviceType, ... }
+async function assertOfferingDefined(shipmentMode, serviceType) {
+  const offering = await prisma.serviceOffering.findUnique({
+    where: { shipmentMode_serviceType: { shipmentMode, serviceType } },
+  });
+  if (!offering) {
+    throw new ApiError(400, `${shipmentMode} + ${serviceType} is not a defined offering. Define the offering first (Admin > Rates > Offerings).`);
+  }
+}
+
+async function assertNoConflict(band, ignoreId) {
+  if (!band.isActive) return;
+  const existing = await prisma.priceBand.findMany({
+    where: { isActive: true, shipmentMode: band.shipmentMode, serviceType: band.serviceType },
+  });
+  const clash = findConflict(band, existing, { ignoreId });
+  if (clash) {
+    throw new ApiError(
+      409,
+      `This rate overlaps an existing active rate for ${band.shipmentMode} + ${band.serviceType} (${clash.minKg}–${clash.maxKg ?? '∞'}kg, ${clash.zone !== null ? 'zone ' + clash.zone : 'multi-zone'}). Adjust the weight range, zone or validity window.`,
+    );
+  }
+}
+
 async function createPriceBand(req, res) {
-  const {
-    label, serviceType,
-    zone, pricePerKg, basePrice,
-    fixedPricePerKgByZone,
-    discountPercent,
-    minKg, maxKg, minTons, maxTons, minCartons, maxCartons,
-    validFrom, validUntil, notes, isActive,
-    shipmentMode, // [V1 Feature 1] AIR | LAND | SEA — defaults to LAND
-  } = req.body;
+  const data = normalizeBand(req.body);
+  await assertOfferingDefined(data.shipmentMode, data.serviceType);
+  await assertNoConflict(data, null);
 
-  // Validate: must have at least one pricing mechanism
-  if (!pricePerKg && !basePrice && !fixedPricePerKgByZone && !discountPercent) {
-    throw new ApiError(400, 'Provide at least one of: pricePerKg, basePrice, fixedPricePerKgByZone, or discountPercent');
-  }
-
-  // If fixedPricePerKgByZone is provided, zone is not needed (it's embedded in the map)
-  // If neither is provided in multi-zone mode, zone is required for single-zone mode
-  if (!fixedPricePerKgByZone && !zone && zone !== 0) {
-    throw new ApiError(400, 'Provide zone (for single-zone bands) or fixedPricePerKgByZone (for multi-zone bands)');
-  }
-
-  const data = {
-    label:                  label      || null,
-    serviceType:            serviceType || 'STANDARD',
-    shipmentMode:           shipmentMode || 'LAND',
-    zone:                   fixedPricePerKgByZone ? null : (zone !== undefined ? parseInt(zone) : null),
-    pricePerKg:             pricePerKg  ? parseFloat(pricePerKg)  : null,
-    basePrice:              basePrice   ? parseFloat(basePrice)   : null,
-    fixedPricePerKgByZone:  fixedPricePerKgByZone || null,
-    discountPercent:        discountPercent ? parseFloat(discountPercent) : null,
-    minKg:                  minKg      !== undefined ? parseFloat(minKg)      : 0,
-    maxKg:                  maxKg      !== undefined ? parseFloat(maxKg)      : null,
-    minTons:                minTons    !== undefined ? parseFloat(minTons)    : 0,
-    maxTons:                maxTons    !== undefined ? parseFloat(maxTons)    : null,
-    minCartons:             minCartons !== undefined ? parseInt(minCartons)   : 0,
-    maxCartons:             maxCartons !== undefined ? parseInt(maxCartons)   : null,
-    validFrom:              validFrom  ? new Date(validFrom)  : null,
-    validUntil:             validUntil ? new Date(validUntil) : null,
-    notes:                  notes      || null,
-    isActive:               isActive !== undefined ? isActive : true,
-    createdBy:              req.user.id,
-  };
-
-  const band = await prisma.priceBand.create({ data });
+  const band = await prisma.priceBand.create({ data: { ...data, createdBy: req.user.id } });
 
   await prisma.priceAuditLog.create({
     data: {
@@ -338,24 +322,29 @@ async function createPriceBand(req, res) {
   return created(res, { band }, 'Price band created');
 }
 
+// Only these fields may be changed through the API (no mass assignment).
+const BAND_EDITABLE = [
+  'label', 'zone', 'pricePerKg', 'basePrice', 'fixedPricePerKgByZone', 'discountPercent',
+  'minKg', 'maxKg', 'minTons', 'maxTons', 'minCartons', 'maxCartons',
+  'serviceType', 'shipmentMode', 'validFrom', 'validUntil', 'notes', 'isActive',
+];
+
 async function updatePriceBand(req, res) {
   const { id } = req.params;
   const existing = await prisma.priceBand.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, 'Price band not found');
 
-  // Sanitise numeric fields
-  const data = { ...req.body };
-  if (data.zone        !== undefined) data.zone        = data.zone !== null ? parseInt(data.zone) : null;
-  if (data.pricePerKg  !== undefined) data.pricePerKg  = data.pricePerKg  !== null ? parseFloat(data.pricePerKg)  : null;
-  if (data.basePrice   !== undefined) data.basePrice   = data.basePrice   !== null ? parseFloat(data.basePrice)   : null;
-  if (data.minKg       !== undefined) data.minKg       = parseFloat(data.minKg);
-  if (data.maxKg       !== undefined) data.maxKg       = data.maxKg !== null ? parseFloat(data.maxKg) : null;
-  if (data.validFrom   !== undefined) data.validFrom   = data.validFrom   ? new Date(data.validFrom)   : null;
-  if (data.validUntil  !== undefined) data.validUntil  = data.validUntil  ? new Date(data.validUntil)  : null;
-  // Remove reason before saving (it's audit-only)
-  const { reason, ...saveData } = data;
+  const { reason, ...body } = req.body;
+  const patch = Object.fromEntries(Object.entries(body).filter(([k]) => BAND_EDITABLE.includes(k)));
+  // Switching between a single zone and a fixed map must clear the other side.
+  if (patch.fixedPricePerKgByZone && patch.zone === undefined) patch.zone = null;
+  if (patch.zone !== undefined && patch.zone !== null && patch.fixedPricePerKgByZone === undefined) patch.fixedPricePerKgByZone = null;
 
-  const band = await prisma.priceBand.update({ where: { id }, data: saveData });
+  const data = normalizeBand({ ...existing, ...patch });
+  if (data.isActive) await assertOfferingDefined(data.shipmentMode, data.serviceType);
+  await assertNoConflict(data, id);
+
+  const band = await prisma.priceBand.update({ where: { id }, data });
 
   await prisma.priceAuditLog.create({
     data: {
@@ -522,6 +511,16 @@ async function rollbackPriceBand(req, res) {
   const current = await prisma.priceBand.findUnique({ where: { id: log.entityId } });
   if (!current) throw new ApiError(404, 'Price band no longer exists');
 
+  // A rollback restores an OLD rate — it must still be a valid, non-clashing
+  // one today (mode/service defined, no overlap with a rate added since).
+  const restored = normalizeBand({
+    ...current,
+    ...prev,
+    shipmentMode: prev.shipmentMode || 'LAND', // pre-mode audit entries were LAND
+  });
+  if (restored.isActive) await assertOfferingDefined(restored.shipmentMode, restored.serviceType);
+  await assertNoConflict(restored, log.entityId);
+
   const band = await prisma.priceBand.update({
     where: { id: log.entityId },
     data: {
@@ -570,7 +569,7 @@ async function exportPricingSheet(req, res) {
     prisma.boxDimension.findMany({ orderBy: { categoryId: 'asc' } }),
     prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
     prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
-    prisma.priceBand.findMany({ orderBy: [{ zone: 'asc' }, { serviceType: 'asc' }, { minKg: 'asc' }] }),
+    prisma.priceBand.findMany({ orderBy: [{ shipmentMode: 'asc' }, { serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }] }),
   ]);
 
   const wb = XLSX.utils.book_new();
@@ -620,16 +619,18 @@ async function exportPricingSheet(req, res) {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(kmRows), 'Matrix by KM');
 
   // ── Price Bands sheet (flat — current actual pricing) ──
-  const priceHeader = ['Zone', 'Min Kg', 'Max Kg', 'Service Type', 'Price Per Kg (NGN)', 'Base Price (NGN)', 'Active', 'Notes'];
+  const priceHeader = ['Zone', 'Min Kg', 'Max Kg', 'Mode', 'Service Type', 'Price Per Kg (NGN)', 'Base Price (NGN)', 'Fixed Price/Kg By Zone (JSON)', 'Active', 'Notes'];
   const priceRows = [priceHeader];
   for (const b of priceBands) {
     priceRows.push([
       b.zone,
       b.minKg,
       b.maxKg ?? 'No limit',
+      b.shipmentMode,
       b.serviceType,
       b.pricePerKg,
       b.basePrice,
+      b.fixedPricePerKgByZone ? JSON.stringify(b.fixedPricePerKgByZone) : '',
       b.isActive ? 'TRUE' : 'FALSE',
       b.notes ?? '',
     ]);
@@ -679,6 +680,18 @@ async function importPricingSheet(req, res) {
 
   const results = { cities: 0, zones: 0, km: 0, priceBands: 0, dimensions: 0, errors: [] };
   const importerId = req.user?.id ?? null;
+
+  // The legacy pricing sheet has no mode column — it is a single rate card, so
+  // the mode it belongs to must be stated. Defaults to LAND (the mode all
+  // pre-existing sheets were written for); pass `shipmentMode` to import an
+  // AIR or SEA card. Bands are only created for products that are DEFINED
+  // offerings in that mode — never for a mode/service BowaGO does not sell.
+  const importMode = (req.body?.shipmentMode || 'LAND').toUpperCase();
+  if (!['AIR', 'LAND', 'SEA'].includes(importMode)) {
+    throw new ApiError(400, 'shipmentMode must be one of AIR, LAND, SEA');
+  }
+  const importOfferings = await prisma.serviceOffering.findMany({ where: { shipmentMode: importMode } });
+  const importServices = importOfferings.map((o) => o.serviceType);
 
   // Dimensions sheet
   if (workbook.SheetNames.includes('Dimensions')) {
@@ -954,7 +967,7 @@ async function importPricingSheet(req, res) {
           lowestMinKgByZone[currentZone] = minKg;
         }
 
-        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
+        for (const serviceType of importServices) {
           parsedBands.push({ zone: currentZone, serviceType, minKg, maxKg, kgStr });
         }
       }
@@ -963,7 +976,7 @@ async function importPricingSheet(req, res) {
       for (const [zoneStr, lowestMinKg] of Object.entries(lowestMinKgByZone)) {
         const zone = parseInt(zoneStr);
         if (lowestMinKg <= 0) continue;
-        for (const serviceType of ['EXPRESS', 'STANDARD', 'ECONOMY']) {
+        for (const serviceType of importServices) {
           parsedBands.push({
             zone, serviceType, minKg: 0, maxKg: lowestMinKg - 1,
             kgStr: `0-${lowestMinKg - 1} (gap-fill)`,
@@ -976,7 +989,7 @@ async function importPricingSheet(req, res) {
       // (zone, serviceType, minKg, maxKg) combos we're about to consider.
       const zonesInvolved = [...new Set(parsedBands.map((b) => b.zone))];
       const existingBands = await prisma.priceBand.findMany({
-        where: { zone: { in: zonesInvolved } },
+        where: { zone: { in: zonesInvolved }, shipmentMode: importMode },
         select: { zone: true, serviceType: true, minKg: true, maxKg: true },
       });
       const existingKey = (b) => `${b.zone}|${b.serviceType}|${b.minKg}|${b.maxKg ?? 'null'}`;
@@ -998,12 +1011,14 @@ async function importPricingSheet(req, res) {
           data: {
             zone: b.zone,
             serviceType: b.serviceType,
+            shipmentMode: importMode,
             minKg: b.minKg,
             maxKg: b.maxKg,
-            // Placeholder — 0 so admin can see the band exists and set real prices
-            pricePerKg: 0,
-            basePrice: 0,
-            isActive: true,
+            // Placeholder row: no price yet, and INACTIVE so it can never be
+            // quoted (it used to be an active ₦0 band that priced shipments free).
+            pricePerKg: null,
+            basePrice: null,
+            isActive: false,
             ...(b.isGapFill && {
               notes: 'Auto-generated gap-fill band — set real pricing for shipments under the imported sheet\'s minimum weight.',
             }),
@@ -1061,12 +1076,12 @@ async function importPricingSheet(req, res) {
 async function backfillLowWeightBands(req, res) {
   const bands = await prisma.priceBand.findMany({
     where: { zone: { not: null } },
-    select: { zone: true, serviceType: true, minKg: true },
+    select: { zone: true, serviceType: true, shipmentMode: true, minKg: true },
   });
 
   const lowestByZoneService = {};
   for (const b of bands) {
-    const key = `${b.zone}:${b.serviceType}`;
+    const key = `${b.zone}:${b.shipmentMode}:${b.serviceType}`;
     if (lowestByZoneService[key] === undefined || b.minKg < lowestByZoneService[key]) {
       lowestByZoneService[key] = b.minKg;
     }
@@ -1077,12 +1092,12 @@ async function backfillLowWeightBands(req, res) {
 
   for (const [key, lowestMinKg] of Object.entries(lowestByZoneService)) {
     if (lowestMinKg <= 0) continue;
-    const [zoneStr, serviceType] = key.split(':');
+    const [zoneStr, shipmentMode, serviceType] = key.split(':');
     const zone = parseInt(zoneStr);
 
     try {
       const existing = await prisma.priceBand.findFirst({
-        where: { zone, serviceType, minKg: 0, maxKg: lowestMinKg - 1 },
+        where: { zone, shipmentMode, serviceType, minKg: 0, maxKg: lowestMinKg - 1 },
       });
 
       if (!existing) {
@@ -1090,11 +1105,13 @@ async function backfillLowWeightBands(req, res) {
           data: {
             zone,
             serviceType,
+            shipmentMode,
             minKg: 0,
             maxKg: lowestMinKg - 1,
-            pricePerKg: 0,
-            basePrice: 0,
-            isActive: true,
+            // Placeholder: unpriced and INACTIVE, so it can never be quoted.
+            pricePerKg: null,
+            basePrice: null,
+            isActive: false,
             notes: 'Auto-generated gap-fill band — set real pricing for shipments under the imported sheet\'s minimum weight.',
             ...(req.user?.id ? { createdBy: req.user.id } : {}),
           },
@@ -1102,7 +1119,7 @@ async function backfillLowWeightBands(req, res) {
         created++;
       }
     } catch (e) {
-      errors.push(`zone${zone} ${serviceType}: ${e.message}`);
+      errors.push(`zone${zone} ${shipmentMode} ${serviceType}: ${e.message}`);
     }
   }
 

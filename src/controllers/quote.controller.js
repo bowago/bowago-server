@@ -1,14 +1,15 @@
+const crypto = require("crypto");
 const { prisma } = require("../config/db");
-const { calculateShippingCost, assertModeActive } = require("../services/pricing.service");
-const { applyAdhocChargesAtQuote } = require("../services/adhocCharge.service");
+const { calculateShippingCost, getOfferings } = require("../services/pricing.service");
+const { buildAdhocRows } = require("../services/adhocCharge.service");
+const { quoteColumns, pricingBlock } = require("../services/quoteSnapshot");
 const { ApiError } = require("../utils/ApiError");
 const { success, created } = require("../utils/helpers");
-const { getNumberSetting } = require("../services/settings.service");
 
 const QUOTE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const SHIPMENT_MODES = ["AIR", "LAND", "SEA"];
-// [V1 Feature 1] Air/Sea show the dangerous-goods (batteries) notice from the
-// Knowledge Base before the user continues — Land does not require it.
+// Air/Sea show the dangerous-goods (batteries) notice from the Knowledge Base
+// before the user continues — Land does not require it.
 const DANGEROUS_GOODS_MODES = ["AIR", "SEA"];
 
 // ─── Convert Naira to Kobo (avoid float errors per PRD) ──────────────────────
@@ -36,9 +37,7 @@ async function recordConsent(userId, sessionId, consentType, req, extra = {}) {
   }
 }
 
-// [V1 Feature 2] declaredValue is now always required, whether or not
-// insurance is selected — the v2.0 "defaults to booking price" behaviour is
-// gone because pre-filling from price understates a terminal's real value.
+// declaredValue is always required, whether or not insurance is selected.
 function assertDeclaredValue(declaredValue) {
   const value = parseFloat(declaredValue);
   if (!declaredValue || isNaN(value) || value <= 0) {
@@ -50,224 +49,129 @@ function assertDeclaredValue(declaredValue) {
   return value;
 }
 
-// ─── Build one mode's quote preview (used both for a single quote and for
-// side-by-side mode comparison) — does NOT persist anything. ───────────────
-async function buildQuotePreview(body, shipmentMode, userId) {
-  const {
-    originCity,
-    destinationCity,
-    weightKg,
-    tons,
-    cartons,
-    lengthCm,
-    widthCm,
-    heightCm,
-    boxDimensionId,
-    serviceType,
-    insuranceSelected,
-    declaredValue,
-    promoCode,
-  } = body;
-
-  return calculateShippingCost({
-    fromCity: originCity,
-    toCity: destinationCity,
-    weightKg,
-    tons,
-    cartons,
-    customLength: lengthCm,
-    customWidth: widthCm,
-    customHeight: heightCm,
-    boxDimensionId,
-    serviceType: serviceType || "STANDARD",
-    shipmentMode,
+// Map the HTTP body onto the pricing engine's request.
+function toEngineRequest(body, userId, { mode, service } = {}) {
+  return {
+    fromCity: body.originCity,
+    toCity: body.destinationCity,
+    weightKg: body.weightKg,
+    tons: body.tons,
+    cartons: body.cartons,
+    boxDimensionId: body.boxDimensionId || null,
+    customLength: body.lengthCm,
+    customWidth: body.widthCm,
+    customHeight: body.heightCm,
+    shipmentMode: mode,
+    serviceType: service,
     isFragile: false,
-    requiresInsurance: !!insuranceSelected,
-    insuranceValue: declaredValue || null,
-    promoCode: promoCode || null,
+    requiresInsurance: !!body.insuranceSelected,
+    insuranceValue: body.declaredValue ? parseFloat(body.declaredValue) : null,
+    promoCode: body.promoCode || null,
     userId,
-  });
+  };
 }
 
-// ─── Generate Quote (Public — no auth required) ───────────────────────────────
-// [V1] shipmentMode is now required — either a single mode (AIR/LAND/SEA) to
-// generate & persist the official 15-minute quote, or an array of modes to
-// get a side-by-side comparison preview (no Quote row is created for a
-// comparison request; the client re-calls with one chosen mode to book).
+// A quote is for ONE product: mode + service (or an offeringId that names both).
+// Nothing is defaulted — a request that does not say what it is buying is rejected.
+async function resolveProduct(body) {
+  const { shipmentMode, serviceType, offeringId } = body;
+  if (Array.isArray(shipmentMode)) {
+    throw new ApiError(
+      400,
+      "Provide a single shipping option. To compare options call POST /quotes/offerings.",
+      null,
+      "OFFERING_REQUIRED",
+    );
+  }
+  if (offeringId) {
+    const o = await prisma.serviceOffering.findUnique({ where: { id: offeringId } });
+    if (!o) throw new ApiError(404, "Shipping option not found", null, "NOT_OFFERED");
+    if ((shipmentMode && shipmentMode !== o.shipmentMode) || (serviceType && serviceType !== o.serviceType)) {
+      throw new ApiError(400, "offeringId does not match the given shipmentMode/serviceType", null, "OFFERING_MISMATCH");
+    }
+    return { mode: o.shipmentMode, service: o.serviceType };
+  }
+  if (!shipmentMode || !serviceType) {
+    throw new ApiError(
+      400,
+      `shipmentMode (${SHIPMENT_MODES.join(", ")}) and serviceType (EXPRESS, STANDARD, ECONOMY) are both required — or provide an offeringId`,
+      null,
+      "OFFERING_REQUIRED",
+    );
+  }
+  return { mode: shipmentMode, service: serviceType };
+}
+
+// ─── POST /quotes/offerings (public) ─────────────────────────────────────────
+// Every shipping product that is ACTUALLY available for this route + parcel,
+// each with its own SLA, rate and full breakdown. Clients must render these —
+// never generate a mode × service grid of their own.
+async function getQuoteOfferings(req, res) {
+  const body = req.body || {};
+  if (!body.originCity || !body.destinationCity) {
+    throw new ApiError(400, "originCity and destinationCity are required");
+  }
+  const userId = req.user?.id || null;
+  const out = await getOfferings({
+    ...toEngineRequest(body, userId, {}),
+    shipmentMode: body.shipmentMode || undefined,
+    serviceType: body.serviceType || undefined,
+  });
+  return success(
+    res,
+    {
+      ...out,
+      offerings: out.offerings.map((o) => ({
+        ...o,
+        requiresDangerousGoodsNotice: DANGEROUS_GOODS_MODES.includes(o.shipmentMode),
+      })),
+    },
+    "Shipping options calculated",
+  );
+}
+
+// ─── POST /quotes — generate & persist the official 15-minute quote ──────────
 async function generateQuote(req, res) {
-  const {
-    originCity,
-    destinationCity,
-    shipmentMode,
-    declaredValue,
-    termsAccepted, // Sprint 7: user must tick "I agree to Terms of Service"
-  } = req.body;
+  const { originCity, destinationCity, declaredValue, termsAccepted, insuranceSelected } = req.body;
 
-  // ─── Sprint 7: Terms consent check ──────────────────────────────────────
   if (!termsAccepted) {
-    throw new ApiError(
-      400,
-      "You must accept the Terms of Service to generate a quote.",
-    );
+    throw new ApiError(400, "You must accept the Terms of Service to generate a quote.");
   }
-
-  if (!shipmentMode) {
-    throw new ApiError(
-      400,
-      `shipmentMode is required — choose one of ${SHIPMENT_MODES.join(", ")}, or provide a list to compare modes`,
-    );
-  }
-
+  const { mode, service } = await resolveProduct(req.body);
+  const declaredValueNumber = assertDeclaredValue(declaredValue);
   const userId = req.user?.id || null;
 
-  // ─── [V1] Compare mode: array of modes → side-by-side preview, no persist ──
-  if (Array.isArray(shipmentMode)) {
-    const modes = shipmentMode.filter((m) => SHIPMENT_MODES.includes(m));
-    if (modes.length === 0) {
-      throw new ApiError(400, `Provide at least one valid mode: ${SHIPMENT_MODES.join(", ")}`);
-    }
-    assertDeclaredValue(declaredValue);
+  const engineReq = toEngineRequest(req.body, userId, { mode, service });
+  const result = await calculateShippingCost(engineReq);
 
-    const results = await Promise.allSettled(
-      modes.map(async (mode) => {
-        await assertModeActive(mode);
-        return buildQuotePreview(req.body, mode, userId);
-      }),
-    );
-
-    const modeOptions = modes.map((mode, i) => {
-      const r = results[i];
-      if (r.status === "rejected") {
-        return { mode, available: false, reason: r.reason?.message || "Not available" };
-      }
-      const q = r.value;
-      return {
-        mode,
-        available: true,
-        totalNaira: q.total,
-        transitHours: q.transitHours,
-        deliveryEstimate: q.deliveryEstimate,
-        requiresDangerousGoodsNotice: DANGEROUS_GOODS_MODES.includes(mode),
-        adhocCharges: q.adhocCharges,
-      };
-    });
-
-    return success(res, { modeOptions, comparisonOnly: true }, "Mode comparison calculated");
-  }
-
-  // ─── Single mode → generate & persist the official quote ──────────────────
-  if (!SHIPMENT_MODES.includes(shipmentMode)) {
-    throw new ApiError(400, `shipmentMode must be one of ${SHIPMENT_MODES.join(", ")}`);
-  }
-  await assertModeActive(shipmentMode);
-  const declaredValueNumber = assertDeclaredValue(declaredValue);
-
-  const quote = await buildQuotePreview(req.body, shipmentMode, userId);
-
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + QUOTE_TTL_MS);
-  const { insuranceSelected, serviceType } = req.body;
-
-  // Insurance premium — rate is configurable by Super Admin in
-  // Settings → Business Rules (insurance.rate_percent, default 2.5%).
-  // Minimum premium is also configurable (insurance.min_premium_naira, default ₦100).
-  // [V1] declaredValueKobo is now ALWAYS captured, regardless of the toggle —
-  // only the premium itself is conditional on insuranceSelected.
+  const expiresAt = new Date(Date.now() + QUOTE_TTL_MS);
+  const quoteId = crypto.randomUUID();
   const declaredValueKobo = toKobo(declaredValueNumber);
-  let insurancePremiumKobo = null;
-  if (insuranceSelected) {
-    const [ratePercent, minPremiumNaira] = await Promise.all([
-      getNumberSetting("insurance.rate_percent"),
-      getNumberSetting("insurance.min_premium_naira"),
-    ]);
-    const minPremiumKobo = toKobo(minPremiumNaira);
-    insurancePremiumKobo = Math.max(
-      minPremiumKobo,
-      Math.round(declaredValueKobo * (ratePercent / 100)),
-    );
-  }
 
-  // Store all prices in kobo
-  const basePriceKobo = toKobo(quote.breakdown.finalBasePrice);
-  const fuelKobo = toKobo(
-    quote.surchargeBreakdown.find((s) => s.type === "FUEL")?.amount || 0,
-  );
-  const remoteKobo = toKobo(
-    quote.surchargeBreakdown.find((s) => s.type === "REMOTE_AREA")?.amount || 0,
-  );
-  const vatKobo = toKobo(
-    quote.surchargeBreakdown.find((s) => s.type === "VAT")?.amount || 0,
-  );
-  // [V1] Recompute the true insurance-adjusted total: `quote.total` already
-  // bakes in the auto-apply adhoc charges (see pricing.service.js), so we
-  // only need to add the insurance premium on top, exactly as before.
-  const totalPriceKobo = toKobo(quote.total) + (insurancePremiumKobo || 0);
-  const adhocChargesKobo = toKobo(quote.adhocTotalNaira || 0);
-
-  const record = await prisma.quote.create({
-    data: {
-      userId,
-      status: "GENERATED",
-      originCity,
-      originCityId: quote.fromCity.id,
-      destinationCity,
-      destinationCityId: quote.toCity.id,
-      zone: quote.zone,
-      distanceKm: quote.distanceKm,
-      weightKg: quote.weightKg,
-      volumetricWeightKg: quote.measurements?.volumetricWeightKg ?? quote.weightKg,
-      billableWeightKg: quote.weightKg,
-      lengthCm: req.body.lengthCm || null,
-      widthCm: req.body.widthCm || null,
-      heightCm: req.body.heightCm || null,
-      serviceType: serviceType || "STANDARD",
-      shipmentMode,
-      basePriceKobo,
-      fuelSurchargeKobo: fuelKobo,
-      remoteAreaFeeKobo: remoteKobo,
-      adhocChargesKobo,
-      vatKobo,
-      totalPriceKobo,
-      // Full breakdown as-computed, so any custom/ad-hoc surcharge type
-      // (beyond fuel/remote-area/VAT) is preserved exactly as the customer
-      // saw it at quote time — the three *Kobo columns above only cover the
-      // three built-in types.
-      surchargeBreakdown: quote.surchargeBreakdown ?? [],
-      insuranceSelected: !!insuranceSelected,
-      declaredValueKobo,
-      insurancePremiumKobo,
-      promoCode: req.body.promoCode || null,
-      promoDiscountKobo: quote.appliedDiscount
-        ? toKobo(quote.appliedDiscount.discountAmount || 0)
-        : null,
-      pricingMode: quote.pricingMode || "STANDARD",
-      expiresAt,
-    },
+  // The quote and its ad-hoc lines are written atomically, from the SAME
+  // engine evaluation that produced the total — no second evaluation, no
+  // chance of a total that includes a charge with no line behind it.
+  const adhocRows = buildAdhocRows({
+    quoteId,
+    autoApply: result.adhocEvaluation.autoApply,
+    suggested: result.adhocEvaluation.suggested,
+    vatRatePercent: result.taxRatePercent,
   });
+  const ops = [
+    prisma.quote.create({
+      data: {
+        id: quoteId,
+        ...quoteColumns(result, engineReq, {
+          userId, originCity, destinationCity, expiresAt, declaredValueKobo, insuranceSelected,
+        }),
+      },
+    }),
+  ];
+  if (adhocRows.length > 0) ops.push(prisma.shipmentAdhocCharge.createMany({ data: adhocRows }));
+  const [record] = await prisma.$transaction(ops);
 
-  // [V1 Features 5/6] Persist the adhoc charge lines (AUTO_APPLY as APPLIED,
-  // SUGGEST as SUGGESTED for the admin queue) against this quote, using the
-  // exact same measurements the total above was computed from.
-  let adhocResult = { lines: [], suggestedCount: 0 };
-  try {
-    adhocResult = await applyAdhocChargesAtQuote({
-      quoteId: record.id,
-      shipmentMode,
-      measurements: quote.measurements,
-      basePriceKobo,
-    });
-  } catch (err) {
-    console.error("[Quotes] Failed to persist adhoc charges:", err.message);
-  }
-
-  // ─── Sprint 7: Log TERMS_OF_SERVICE consent ──────────────────────────────
-  // Fire-and-forget (not awaited) so it never delays the response.
-  recordConsent(
-    userId,
-    req.headers["x-session-id"] || null,
-    "TERMS_OF_SERVICE",
-    req,
-  );
+  // Sprint 7: log TERMS_OF_SERVICE consent (fire-and-forget).
+  recordConsent(userId, req.headers["x-session-id"] || null, "TERMS_OF_SERVICE", req);
 
   return created(
     res,
@@ -276,37 +180,36 @@ async function generateQuote(req, res) {
       status: record.status,
       expiresAt: record.expiresAt,
       expiresInSeconds: Math.floor(QUOTE_TTL_MS / 1000),
-      origin: { city: originCity, id: quote.fromCity.id },
-      destination: { city: destinationCity, id: quote.toCity.id },
-      zone: quote.zone,
-      billableWeightKg: quote.weightKg,
+      origin: { city: originCity, id: result.fromCity.id },
+      destination: { city: destinationCity, id: result.toCity.id },
+      zone: result.zone,
+      distanceKm: result.distanceKm,
+      // The purchased product, unambiguously.
+      offeringId: record.offeringId,
+      shipmentMode: record.shipmentMode,
       serviceType: record.serviceType,
-      shipmentMode,
-      transitHours: quote.transitHours,
-      deliveryEstimate: quote.deliveryEstimate,
-      distanceKm: quote.distanceKm,
-      requiresDangerousGoodsNotice: DANGEROUS_GOODS_MODES.includes(shipmentMode),
+      displayName: result.displayName,
+      deliveryEstimate: result.deliveryEstimate,
+      billableWeightKg: result.billableWeightKg,
+      measurements: result.measurements,
+      requiresDangerousGoodsNotice: DANGEROUS_GOODS_MODES.includes(record.shipmentMode),
       declaredValueNaira: declaredValueNumber,
-      pricing: {
-        basePriceNaira: record.basePriceKobo / 100,
-        fuelSurchargeNaira: record.fuelSurchargeKobo / 100,
-        remoteAreaFeeNaira: record.remoteAreaFeeKobo / 100,
-        adhocChargesNaira: record.adhocChargesKobo / 100,
-        vatNaira: record.vatKobo / 100,
-        insurancePremiumNaira: insurancePremiumKobo
-          ? insurancePremiumKobo / 100
-          : null,
-        totalNaira: record.totalPriceKobo / 100,
-        basePriceKobo: record.basePriceKobo,
-        totalPriceKobo: record.totalPriceKobo,
-      },
-      pricingMode: quote.pricingMode, // STANDARD | CONTRACT | PROMO (also persisted)
-      appliedDiscount: quote.appliedDiscount,
-      surchargeBreakdown: quote.surchargeBreakdown,
-      // [V1] Each adhoc line the customer is actually being charged, plus a
-      // count of items waiting in the admin suggestion queue (not charged).
-      adhocCharges: adhocResult.lines,
-      adhocSuggestionsPending: adhocResult.suggestedCount,
+      // Explicit components — render these, never rebuild a subtotal from `total`.
+      pricing: pricingBlock(record),
+      surcharges: result.surcharges,
+      adhocCharges: result.adhocCharges.map((a) => ({
+        chargeTypeId: a.chargeTypeId,
+        name: a.label,
+        reason: a.description,
+        amountKobo: a.amountKobo,
+        amountNaira: a.amount,
+        vatApplicable: a.vatApplicable,
+      })),
+      adhocSuggestionsPending: result.adhocSuggestions.length,
+      surchargeBreakdown: record.surchargeBreakdown,
+      pricingMode: result.pricingMode,
+      appliedDiscount: result.appliedDiscount,
+      promoStatus: result.promoStatus,
       currency: "NGN",
     },
     "Quote generated",
@@ -328,13 +231,13 @@ async function getQuote(req, res) {
     record.status = "EXPIRED";
   }
 
-  return success(res, { quote: record });
+  return success(res, { quote: record, pricing: pricingBlock(record) });
 }
 
-// ─── [V1 Feature 8] Refresh an expired quote ──────────────────────────────────
-// Returns a fresh 15-minute quote for the same inputs, at current rates.
-// The old quote stays EXPIRED; a shipment draft pointing at it should be
-// re-pointed at the new quoteId (see shipmentDraft.controller.js).
+// ─── Refresh an expired quote ────────────────────────────────────────────────
+// Returns a fresh 15-minute quote for the same inputs and the SAME product, at
+// current rates. The old quote stays EXPIRED; a shipment draft pointing at it
+// should be re-pointed at the new quoteId (see shipmentDraft.controller.js).
 async function refreshQuote(req, res) {
   const { id } = req.params;
   const old = await prisma.quote.findUnique({ where: { id } });
@@ -351,28 +254,42 @@ async function refreshQuote(req, res) {
   if (old.status === "BOOKED") {
     throw new ApiError(400, "This quote has already been booked");
   }
+  // A legacy quote never recorded which product it priced. Guessing one would
+  // silently change what the customer is buying.
+  if (!old.shipmentMode) {
+    throw new ApiError(
+      400,
+      "This quote predates shipping options and cannot be refreshed. Please generate a new quote.",
+      null,
+      "LEGACY_QUOTE",
+    );
+  }
 
   if (old.status === "GENERATED" && new Date() > old.expiresAt) {
     await prisma.quote.update({ where: { id }, data: { status: "EXPIRED" } });
   }
 
-  const userId = old.userId || req.user?.id || null;
-  const rebuildBody = {
+  // Replay the ORIGINAL inputs (box selection, carton count, ...) when we have
+  // them; legacy rows fall back to their stored columns.
+  const r = old.pricingSnapshot?.request;
+  req.body = {
     originCity: old.originCity,
     destinationCity: old.destinationCity,
-    weightKg: old.weightKg,
-    lengthCm: old.lengthCm,
-    widthCm: old.widthCm,
-    heightCm: old.heightCm,
+    weightKg: r ? r.weightKg : old.weightKg ?? old.billableWeightKg,
+    tons: r?.tons ?? null,
+    cartons: r?.cartons ?? null,
+    boxDimensionId: r?.boxDimensionId ?? null,
+    lengthCm: r ? r.customLength : old.lengthCm,
+    widthCm: r ? r.customWidth : old.widthCm,
+    heightCm: r ? r.customHeight : old.heightCm,
+    offeringId: old.offeringId || undefined,
     serviceType: old.serviceType,
-    shipmentMode: old.shipmentMode || "LAND",
+    shipmentMode: old.shipmentMode,
     insuranceSelected: old.insuranceSelected,
     declaredValue: old.declaredValueKobo ? old.declaredValueKobo / 100 : null,
     promoCode: old.promoCode,
     termsAccepted: true, // already accepted when the original quote was made
   };
-
-  req.body = rebuildBody;
   return generateQuote(req, res);
 }
 
@@ -448,6 +365,7 @@ async function cancelQuote(req, res) {
 
 module.exports = {
   generateQuote,
+  getQuoteOfferings,
   getQuote,
   refreshQuote,
   cancelQuote,

@@ -10,9 +10,13 @@
 // Feature 4 (alternative phone numbers), pickup date, notes, promo code, and
 // the V1 Feature 7 uninsured-risk acknowledgment tick.
 const { prisma } = require("../config/db");
-const { calculateShippingCost, assertModeActive } = require("../services/pricing.service");
+const { assertOfferingSellable } = require("../services/pricing.service");
+const {
+  pricingBlock,
+  shipmentSnapshotFields,
+  estimatedDeliveryFor,
+} = require("../services/quoteSnapshot");
 const { recordUninsuredAck } = require("../services/insuranceDisclaimer.service");
-const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { recordPromoRedemption } = require("./promoCode.controller");
 const { notify } = require("../services/notify.service");
 const { ApiError } = require("../utils/ApiError");
@@ -25,7 +29,6 @@ const {
 
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RELATIONSHIPS = ["CUSTOMER", "MERCHANT", "EMPLOYER", "OTHER"];
-const PRICE_CHANGE_TOLERANCE_KOBO = 100; // ignore sub-₦1 rounding noise
 
 function isValidNgPhone(phone) {
   if (!phone) return false;
@@ -100,7 +103,13 @@ async function buildReviewPayload(draft) {
       status: quoteExpired ? "EXPIRED" : quote.status,
       expiresAt: quote.expiresAt,
       expiresInSeconds: quoteExpired ? 0 : Math.max(0, Math.floor((quote.expiresAt - now) / 1000)),
+      offeringId: quote.offeringId,
       shipmentMode: quote.shipmentMode,
+      deliveryEstimate:
+        quote.slaMinDays !== null && quote.slaMinDays !== undefined
+          ? { minDays: quote.slaMinDays, maxDays: quote.slaMaxDays, label: quote.slaLabel, source: "SNAPSHOT" }
+          : null,
+      pricingMode: quote.pricingMode,
       originCity: quote.originCity,
       destinationCity: quote.destinationCity,
       billableWeightKg: quote.billableWeightKg,
@@ -110,15 +119,9 @@ async function buildReviewPayload(draft) {
       serviceType: quote.serviceType,
       declaredValueNaira: quote.declaredValueKobo ? quote.declaredValueKobo / 100 : null,
       insuranceSelected: quote.insuranceSelected,
-      pricing: {
-        basePriceNaira: quote.basePriceKobo / 100,
-        fuelSurchargeNaira: quote.fuelSurchargeKobo / 100,
-        remoteAreaFeeNaira: quote.remoteAreaFeeKobo / 100,
-        adhocChargesNaira: quote.adhocChargesKobo / 100,
-        vatNaira: quote.vatKobo / 100,
-        insurancePremiumNaira: quote.insurancePremiumKobo ? quote.insurancePremiumKobo / 100 : null,
-        totalNaira: quote.totalPriceKobo / 100,
-      },
+      // Explicit components straight from the persisted quote.
+      pricing: pricingBlock(quote),
+      surchargeBreakdown: quote.surchargeBreakdown,
       adhocCharges: quote.adhocCharges.map((c) => ({
         name: c.nameSnapshot,
         reason: c.reason,
@@ -216,6 +219,14 @@ async function patchDraft(req, res) {
     // detail entered.
     const newQuote = await prisma.quote.findUnique({ where: { id: quoteId } });
     if (!newQuote) throw new ApiError(404, "Replacement quote not found");
+    // A draft may only be re-pointed at a quote the same customer owns that is
+    // still bookable (this used to accept any quote id).
+    if (newQuote.userId && newQuote.userId !== req.user.id) {
+      throw new ApiError(403, "This quote does not belong to your account");
+    }
+    if (newQuote.status !== "GENERATED" || new Date() > newQuote.expiresAt) {
+      throw new ApiError(400, "The replacement quote is not bookable (expired or already used)");
+    }
     data.quoteId = quoteId;
   }
 
@@ -266,44 +277,20 @@ async function confirmDraft(req, res) {
     throw new ApiError(400, `This quote has already been used (status: ${quote.status}). Please generate a new quote.`);
   }
 
-  await assertModeActive(quote.shipmentMode || "LAND");
+  // Only AVAILABILITY is re-checked (the product must still be offered). The
+  // price, breakdown, SLA and product are the locked quote's — never re-derived
+  // from today's rates. A customer who saw ₦X on a live quote is charged ₦X.
+  if (!quote.shipmentMode) {
+    throw new ApiError(400, "This quote predates shipping options. Please generate a new quote.", null, "LEGACY_QUOTE");
+  }
+  await assertOfferingSellable({
+    offeringId: quote.offeringId,
+    shipmentMode: quote.shipmentMode,
+    serviceType: quote.serviceType,
+  });
 
   const details = { ...draft.details, insuranceOn: !!quote.insuranceSelected };
   validateDetails(details, { forConfirm: true });
-
-  // ─── Recalculate at booking-time rates (PRD: "booking uses rates at
-  // booking time, not quote generation time") ─────────────────────────────
-  const freshQuote = await calculateShippingCost({
-    fromCity: quote.originCity,
-    toCity: quote.destinationCity,
-    weightKg: quote.weightKg,
-    customLength: quote.lengthCm,
-    customWidth: quote.widthCm,
-    customHeight: quote.heightCm,
-    serviceType: quote.serviceType,
-    shipmentMode: quote.shipmentMode || "LAND",
-    isFragile: false,
-    requiresInsurance: quote.insuranceSelected,
-    insuranceValue: quote.declaredValueKobo ? quote.declaredValueKobo / 100 : null,
-    promoCode: quote.promoCode,
-    userId: req.user.id,
-  });
-
-  const freshInsurancePremiumKobo = quote.insuranceSelected ? quote.insurancePremiumKobo : 0;
-  const freshTotalKobo = Math.round(freshQuote.total * 100) + (freshInsurancePremiumKobo || 0);
-
-  if (Math.abs(freshTotalKobo - quote.totalPriceKobo) > PRICE_CHANGE_TOLERANCE_KOBO) {
-    return res.status(409).json({
-      success: false,
-      code: "PRICE_CHANGED",
-      message: "Rates changed since this quote was generated. Please review the new price.",
-      data: {
-        oldTotalNaira: quote.totalPriceKobo / 100,
-        newTotalNaira: freshTotalKobo / 100,
-        breakdown: freshQuote.surchargeBreakdown,
-      },
-    });
-  }
 
   // ─── Cut-off: after 2PM WAT, earliest pickup is next business day ────────
   let resolvedPickupDate = details.pickupDate ? new Date(details.pickupDate) : new Date();
@@ -323,9 +310,7 @@ async function confirmDraft(req, res) {
     /* non-fatal */
   }
 
-  const slaResult = await getEstimatedDelivery(quote.zone, quote.serviceType, resolvedPickupDate, {
-    isSameCity: quote.originCityId === quote.destinationCityId,
-  });
+  const estimatedDelivery = await estimatedDeliveryFor(quote, resolvedPickupDate);
 
   const senderType = details.senderType || "MYSELF";
 
@@ -356,23 +341,17 @@ async function confirmDraft(req, res) {
       distanceKm: quote.distanceKm,
       serviceType: quote.serviceType,
       quotedPrice: quote.totalPriceKobo / 100,
-      // [Fix] The legacy createShipment endpoint always copied the quote's
-      // surcharge breakdown onto the shipment (used by invoice PDFs to show
-      // fuel/remote-area/VAT/adhoc line items) — this draft-confirm path
-      // was missing it, which would have made every invoice generated from
-      // the new booking flow show only the base shipping line.
-      surchargeBreakdown:
-        Array.isArray(quote.surchargeBreakdown) && quote.surchargeBreakdown.length > 0
-          ? quote.surchargeBreakdown
-          : null,
+      // Locked commercial snapshot: product, SLA, priced breakdown (used by
+      // invoices / booking confirmation / shipment views).
+      ...shipmentSnapshotFields(quote),
       isFragile: !!details.isFragile,
       requiresInsurance: !!quote.insuranceSelected,
       insuranceValue: quote.insuranceSelected && quote.declaredValueKobo ? quote.declaredValueKobo / 100 : null,
       notes: details.notes || null,
       pickupDate: resolvedPickupDate,
-      estimatedDelivery: slaResult.estimatedDelivery,
+      estimatedDelivery,
       // ── V1 launch scope fields ─────────────────────────────────────────
-      shipmentMode: quote.shipmentMode || "LAND",
+      shipmentMode: quote.shipmentMode,
       declaredValueKobo: quote.declaredValueKobo,
       insuranceSelected: !!quote.insuranceSelected,
       uninsuredAckAt: !quote.insuranceSelected ? new Date() : null,
@@ -462,7 +441,7 @@ async function confirmDraft(req, res) {
       userId: req.user.id,
       type: "SHIPMENT_UPDATE",
       title: "Booking Confirmed",
-      body: `Your ${{ AIR: "Air", LAND: "Land", SEA: "Sea" }[shipment.shipmentMode] || "Land"} freight shipment ${shipment.trackingNumber} has been booked. ${cutoffWarning ? "Booked after 2PM — earliest pickup is next business day." : ""}`,
+      body: `Your ${{ AIR: "Air", LAND: "Land", SEA: "Sea" }[shipment.shipmentMode]} freight shipment ${shipment.trackingNumber} has been booked. ${cutoffWarning ? "Booked after 2PM — earliest pickup is next business day." : ""}`,
       data: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber, shipmentMode: shipment.shipmentMode },
     },
   });

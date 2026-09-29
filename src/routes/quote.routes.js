@@ -100,6 +100,49 @@ const { optionalAuth, authenticate } = require('../middleware/auth');
  *       404:
  *         description: Rate not found for this weight band
  */
+/**
+ * @swagger
+ * /quotes/offerings:
+ *   post:
+ *     tags: [Quotes]
+ *     summary: "List every shipping option actually available for a route + parcel"
+ *     description: |
+ *       Returns the purchasable shipping products (mode + service) for this
+ *       request. Each one carries its own delivery promise (SLA), rate and an
+ *       explicit price breakdown (basePrice, surchargeTotal, adhocTotal,
+ *       insurancePremium, tax, total). Combinations BowaGO does not operate,
+ *       and products with no SLA or no usable rate for this zone/weight, are
+ *       listed under `unavailable` with a reason code — never fabricated.
+ *       Clients must render these options and must not build a mode × service
+ *       grid, an SLA table, or a subtotal of their own.
+ *       Guest access allowed.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [originCity, destinationCity]
+ *             properties:
+ *               originCity: { type: string }
+ *               destinationCity: { type: string }
+ *               weightKg: { type: number }
+ *               lengthCm: { type: number }
+ *               widthCm: { type: number }
+ *               heightCm: { type: number }
+ *               boxDimensionId: { type: string }
+ *               cartons: { type: integer }
+ *               insuranceSelected: { type: boolean }
+ *               declaredValue: { type: number }
+ *               promoCode: { type: string }
+ *               shipmentMode: { type: string, enum: [AIR, LAND, SEA], description: "Optional filter" }
+ *               serviceType: { type: string, enum: [EXPRESS, STANDARD, ECONOMY], description: "Optional filter" }
+ *     responses:
+ *       200:
+ *         description: Available offerings + unavailable ones with reason codes
+ */
+router.post('/offerings', optionalAuth, ctrl.getQuoteOfferings);
+
 router.post('/', optionalAuth, ctrl.generateQuote);
 
 /**

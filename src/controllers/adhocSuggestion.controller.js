@@ -17,6 +17,8 @@ const { ApiError } = require("../utils/ApiError");
 const { success, getPagination, buildMeta } = require("../utils/helpers");
 const { getNumberSetting } = require("../services/settings.service");
 const { notify } = require("../services/notify.service");
+const { getVatRatePercent, vatKoboOn } = require("../services/adhocCharge.service");
+const { applyApprovedAdhocToQuote } = require("../services/quoteSnapshot");
 
 // ─── Admin: list the suggestion queue ─────────────────────────────────────────
 async function listSuggestions(req, res) {
@@ -88,21 +90,48 @@ async function decideSuggestion(req, res) {
 
   const finalAmountKobo = decision === "EDIT" ? parseInt(amountKobo, 10) : charge.amountKobo;
   const finalVatKobo = charge.chargeType.vatApplicable
-    ? Math.round(finalAmountKobo * 0.075)
+    ? vatKoboOn(finalAmountKobo, await getVatRatePercent())
     : 0;
 
   // ─── Pre-booking (still just a quote) — approve straight onto the quote ──
   if (charge.quoteId && !charge.shipmentId) {
-    const updated = await prisma.shipmentAdhocCharge.update({
-      where: { id },
-      data: {
-        status: "APPROVED",
-        amountKobo: finalAmountKobo,
-        vatKobo: finalVatKobo,
-        decidedByUserId: req.user.id,
-        decisionReason: reason || null,
-      },
-    });
+    const quote = await prisma.quote.findUnique({ where: { id: charge.quoteId } });
+    if (!quote) throw new ApiError(404, "Linked quote no longer exists");
+    // An approved charge must actually change what the customer pays. That is
+    // only possible while the quote is still open; once booked, the weigh-in
+    // flow (which needs customer approval) is the only way to add a charge.
+    if (quote.status !== "GENERATED" || new Date() > quote.expiresAt) {
+      throw new ApiError(
+        400,
+        `This quote is no longer open (status: ${quote.status}). The charge cannot be added to it.`,
+      );
+    }
+
+    const [updated] = await prisma.$transaction([
+      prisma.shipmentAdhocCharge.update({
+        where: { id },
+        data: {
+          status: "APPROVED",
+          amountKobo: finalAmountKobo,
+          vatKobo: finalVatKobo,
+          decidedByUserId: req.user.id,
+          decisionReason: reason || null,
+        },
+      }),
+      // The quote total, explicit columns, breakdown and snapshot all move
+      // together, so every view keeps agreeing with the amount charged.
+      prisma.quote.update({
+        where: { id: quote.id },
+        data: applyApprovedAdhocToQuote(quote, {
+          name: charge.chargeType.name,
+          reason: reason || charge.reason,
+          amountKobo: finalAmountKobo,
+          vatKobo: finalVatKobo,
+          vatApplicable: charge.chargeType.vatApplicable,
+          chargeTypeId: charge.chargeTypeId,
+        }),
+      }),
+    ]);
     await logDecision(req.user.id, id, decision, reason);
     return success(res, { charge: updated }, "Adhoc suggestion approved onto the quote");
   }
@@ -117,14 +146,16 @@ async function decideSuggestion(req, res) {
 
   const windowHours = await getNumberSetting("price_adjustment.response_window_hours");
   const responseDeadline = new Date(Date.now() + windowHours * 60 * 60 * 1000);
-  const newTotal = shipment.quotedPrice + finalAmountKobo / 100;
+  // What the customer is asked to approve: the charge PLUS its VAT.
+  const grossIncreaseNaira = (finalAmountKobo + finalVatKobo) / 100;
+  const newTotal = shipment.quotedPrice + grossIncreaseNaira;
 
   const adjustment = await prisma.priceAdjustment.create({
     data: {
       shipmentId: shipment.id,
       originalPrice: shipment.quotedPrice,
       adjustedPrice: newTotal,
-      difference: finalAmountKobo / 100,
+      difference: grossIncreaseNaira,
       reason: reason || charge.reason || `Adhoc charge: ${charge.chargeType.name}`,
       status: "PENDING",
       previousStatus: shipment.status,

@@ -6,13 +6,18 @@ const {
   initializePayment,
   refundPayment,
 } = require("../services/paystack.service");
-const { calculateShippingCost } = require("../services/pricing.service");
+const {
+  calculateShippingCost,
+  getModeSetting,
+  estimateDeliveryDate,
+} = require("../services/pricing.service");
+const { buildSnapshot } = require("../services/quoteSnapshot");
 const {
   getNumberSetting,
   getBoolSetting,
 } = require("../services/settings.service");
 const { notify } = require("../services/notify.service");
-const { reEvaluateAtWeighIn } = require("../services/adhocCharge.service");
+const { reEvaluateAtWeighIn, getVatRatePercent, vatKoboOn } = require("../services/adhocCharge.service");
 
 const TIER_ORDER = ["ECONOMY", "STANDARD", "EXPRESS"];
 
@@ -59,9 +64,13 @@ async function createPriceAdjustment(req, res) {
   // weigh-in. Only meaningful once we actually have a measured weight.
   if (actualWeightKg) {
     try {
+      // Shipments booked before shipping modes existed carry no mode; those were
+      // all LAND. The volumetric divisor is the MODE's own, not a constant.
+      const weighInMode = shipment.shipmentMode || "LAND";
+      const { volumetricDivisor } = await getModeSetting(weighInMode);
       const volumetricWeightKg =
         actualLengthCm && actualWidthCm && actualHeightCm
-          ? Math.ceil(((actualLengthCm * actualWidthCm * actualHeightCm) / 5000) * 2) / 2
+          ? Math.ceil(((actualLengthCm * actualWidthCm * actualHeightCm) / (volumetricDivisor || 5000)) * 2) / 2
           : null;
       const billableWeightKg = Math.max(
         parseFloat(actualWeightKg),
@@ -70,7 +79,7 @@ async function createPriceAdjustment(req, res) {
 
       const { autoApply, suggestedCount } = await reEvaluateAtWeighIn({
         shipmentId,
-        shipmentMode: shipment.shipmentMode || "LAND",
+        shipmentMode: weighInMode,
         measurements: {
           actualWeightKg: parseFloat(actualWeightKg),
           volumetricWeightKg,
@@ -79,12 +88,15 @@ async function createPriceAdjustment(req, res) {
           widthCm: actualWidthCm || null,
           heightCm: actualHeightCm || null,
         },
-        // Best available proxy for the base price component — the rate
-        // engine's PERCENTAGE calc method uses this as its base.
-        basePriceKobo: Math.round(shipment.quotedPrice * 100),
+        // PERCENTAGE ad-hoc charges are a share of the BASE price — use the
+        // booked base from the locked snapshot, not the all-in total.
+        basePriceKobo: Math.round(
+          (shipment.pricingSnapshot?.components?.finalBasePrice ?? shipment.quotedPrice) * 100,
+        ),
       });
 
       if (autoApply.length > 0) {
+        const vatRatePercent = await getVatRatePercent();
         const createdAdhocCharges = await prisma.$transaction(
           autoApply.map((entry) =>
             prisma.shipmentAdhocCharge.create({
@@ -96,7 +108,7 @@ async function createPriceAdjustment(req, res) {
                 reason: entry.reason,
                 amountKobo: entry.amountKobo,
                 vatKobo: entry.chargeType.vatApplicable
-                  ? Math.round(entry.amountKobo * 0.075)
+                  ? vatKoboOn(entry.amountKobo, vatRatePercent)
                   : 0,
                 status: "PENDING_CUSTOMER_APPROVAL",
               },
@@ -104,8 +116,10 @@ async function createPriceAdjustment(req, res) {
           ),
         );
         adhocChargeIds = createdAdhocCharges.map((c) => c.id);
-        const adhocTotalNaira = autoApply.reduce((sum, e) => sum + e.amountKobo, 0) / 100;
-        difference += adhocTotalNaira;
+        // What the customer will actually be asked to pay: charge + its VAT.
+        const adhocGrossNaira =
+          createdAdhocCharges.reduce((sum, c) => sum + c.amountKobo + c.vatKobo, 0) / 100;
+        difference += adhocGrossNaira;
         finalAdjustedPrice = shipment.quotedPrice + difference;
         combinedReason = [
           reason,
@@ -310,6 +324,9 @@ async function downgradePriceAdjustment(req, res) {
     toCity: shipment.recipientCity,
     weightKg: adjustment.actualWeightKg || shipment.weight,
     serviceType: newServiceType,
+    // Same physical mode as booked (legacy shipments without one were LAND).
+    // If that mode does not offer the lower service, the engine says so.
+    shipmentMode: shipment.shipmentMode || "LAND",
     isFragile: shipment.isFragile,
     requiresInsurance: shipment.requiresInsurance,
     insuranceValue: shipment.insuranceValue || 0,
@@ -351,6 +368,21 @@ async function downgradePriceAdjustment(req, res) {
         serviceType: newServiceType,
         quotedPrice: newPrice,
         finalPrice: newPrice,
+        // Keep the locked snapshot coherent with the new product: offering,
+        // SLA and breakdown now describe the downgraded service.
+        offeringId: quote.offeringId,
+        slaMinDays: quote.deliveryEstimate?.minDays ?? null,
+        slaMaxDays: quote.deliveryEstimate?.maxDays ?? null,
+        pricingSnapshot: buildSnapshot(quote, {
+          weightKg: adjustment.actualWeightKg || shipment.weight,
+          isFragile: shipment.isFragile,
+          requiresInsurance: shipment.requiresInsurance,
+          insuranceValue: shipment.insuranceValue || 0,
+        }),
+        surchargeBreakdown: quote.surchargeBreakdown?.length ? quote.surchargeBreakdown : null,
+        ...(quote.deliveryEstimate
+          ? { estimatedDelivery: estimateDeliveryDate(shipment.pickupDate || new Date(), quote.deliveryEstimate.maxDays) }
+          : {}),
         ...(delta > 0 ? {} : { status: resumeStatus }),
       },
     }),

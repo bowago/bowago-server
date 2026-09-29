@@ -2,16 +2,25 @@ const { prisma } = require("../config/db");
 const { checkProximityAndNotify } = require("../services/proximity.service");
 const {
   calculateShippingCost,
-  getDeliveryEstimate,
   assertModeActive,
+  assertOfferingSellable,
+  estimateDeliveryDate,
+  formatDeliveryLabel,
 } = require("../services/pricing.service");
+const {
+  quoteToPricedView,
+  shipmentSnapshotFields,
+  estimatedDeliveryFor,
+  buildSnapshot,
+  pricingBlock,
+} = require("../services/quoteSnapshot");
+const { buildAdhocRows } = require("../services/adhocCharge.service");
 const { recordUninsuredAck } = require("../services/insuranceDisclaimer.service");
 
 const MODE_LABELS = { AIR: "Air", LAND: "Land", SEA: "Sea" };
 const { sendShipmentStatusEmail } = require("../config/email");
 const socketService = require("../services/socket.service");
 const { notify } = require("../services/notify.service");
-const { getEstimatedDelivery } = require("./deliverySLA.controller");
 const { ApiError } = require("../utils/ApiError");
 const { assertOwnedResourceAccess } = require("../utils/access");
 const {
@@ -116,6 +125,7 @@ async function createShipment(req, res) {
   );
 
   let lockedQuote = null;
+  let liveRequest = null;
   let quote;
   let quotedPrice;
   let resolvedServiceType = serviceType || "STANDARD";
@@ -188,87 +198,30 @@ async function createShipment(req, res) {
       );
     }
 
-    quote = {
-      zone: lockedQuote.zone,
-      distanceKm: lockedQuote.distanceKm,
-      weightKg: lockedQuote.billableWeightKg ?? lockedQuote.weightKg,
-      fromCity: fromCityRec,
-      toCity: toCityRec,
-      // Carried over from the locked quote so the booking-confirmation
-      // review and later "view shipment" screens can actually show that a
-      // contract rate or promo code was applied — this used to get dropped
-      // here, which made contract/promo pricing invisible even though the
-      // discount was correctly baked into quotedPrice all along.
-      pricingMode: lockedQuote.pricingMode,
-      appliedDiscount:
-        lockedQuote.pricingMode && lockedQuote.pricingMode !== "STANDARD"
-          ? {
-              type: lockedQuote.pricingMode,
-              label:
-                lockedQuote.pricingMode === "PROMO"
-                  ? `Promo Code "${(lockedQuote.promoCode || "").toUpperCase()}"`
-                  : "Enterprise Contract Rate",
-              // Despite the field name, promoDiscountKobo holds the discount
-              // amount for CONTRACT mode too — see quote.controller.js.
-              discountAmount: (lockedQuote.promoDiscountKobo || 0) / 100,
-            }
-          : null,
-      // Prefer the full itemized breakdown stored on the quote (captures any
-      // custom/ad-hoc surcharge type exactly as computed). Older quotes
-      // generated before this field existed will have it null/empty, so we
-      // fall back to reconstructing from the three built-in kobo columns —
-      // that fallback can't recover a custom surcharge, but it's still
-      // correct for the standard fuel/remote-area/VAT case.
-      total: lockedQuote.totalPriceKobo / 100,
-      totalSurcharge:
-        Array.isArray(lockedQuote.surchargeBreakdown) &&
-        lockedQuote.surchargeBreakdown.length > 0
-          ? lockedQuote.surchargeBreakdown.reduce(
-              (sum, item) => sum + (item.amount || 0),
-              0,
-            ) +
-            (lockedQuote.insurancePremiumKobo || 0) / 100
-          : (lockedQuote.fuelSurchargeKobo +
-              lockedQuote.remoteAreaFeeKobo +
-              lockedQuote.vatKobo +
-              (lockedQuote.insurancePremiumKobo || 0)) /
-            100,
-      surchargeBreakdown:
-        Array.isArray(lockedQuote.surchargeBreakdown) &&
-        lockedQuote.surchargeBreakdown.length > 0
-          ? lockedQuote.surchargeBreakdown
-          : [
-              lockedQuote.fuelSurchargeKobo > 0 && {
-                type: "FUEL",
-                label: "Fuel Surcharge",
-                amount: lockedQuote.fuelSurchargeKobo / 100,
-              },
-              lockedQuote.remoteAreaFeeKobo > 0 && {
-                type: "REMOTE_AREA",
-                label: "Remote Area Fee",
-                amount: lockedQuote.remoteAreaFeeKobo / 100,
-              },
-              lockedQuote.vatKobo > 0 && {
-                type: "VAT",
-                label: "VAT (7.5%)",
-                amount: lockedQuote.vatKobo / 100,
-              },
-            ].filter(Boolean),
-    };
+    // The quote is authoritative: the request body can neither change the
+    // product being bought nor re-price it.
+    if (
+      (shipmentMode && lockedQuote.shipmentMode && shipmentMode !== lockedQuote.shipmentMode) ||
+      (serviceType && serviceType !== lockedQuote.serviceType)
+    ) {
+      throw new ApiError(
+        400,
+        "The shipping option in the request does not match the quote. Please generate a new quote.",
+        null,
+        "OFFERING_MISMATCH",
+      );
+    }
+    // The product must still be offered (mode/offering switched off since the
+    // quote was issued). Price and SLA are NOT re-derived — only availability.
+    await assertOfferingSellable({
+      offeringId: lockedQuote.offeringId,
+      shipmentMode: lockedQuote.shipmentMode,
+      serviceType: lockedQuote.serviceType,
+    });
 
-    // Real zone+service-aware delivery estimate — previously the frontend
-    // always showed a static "1-3 days" for Express etc. regardless of
-    // route, so an intra-city shipment looked identical to a cross-country
-    // one. See pricing.service.js#getDeliveryEstimate.
-    quote.deliveryEstimate = await getDeliveryEstimate(
-      lockedQuote.zone,
-      lockedQuote.serviceType,
-      {
-        isSameCity:
-          !!lockedQuote.originCityId &&
-          lockedQuote.originCityId === lockedQuote.destinationCityId,
-      },
-    );
+    // Price, breakdown, SLA and product come from the locked snapshot.
+    quote = quoteToPricedView(lockedQuote, { fromCity: fromCityRec, toCity: toCityRec });
+    quote.totalSurcharge = Math.round((quote.total - quote.finalBasePrice) * 100) / 100; // deprecated alias
 
     quotedPrice = lockedQuote.totalPriceKobo / 100;
     resolvedServiceType = lockedQuote.serviceType;
@@ -283,7 +236,16 @@ async function createShipment(req, res) {
     }
   } else {
     console.log("[createShipment] no quoteId — calculating live price");
-    quote = await calculateShippingCost({
+    // No silent defaults: the caller must say which product it is buying.
+    if (!shipmentMode || !serviceType) {
+      throw new ApiError(
+        400,
+        "shipmentMode and serviceType are required (or book from a quote via quoteId)",
+        null,
+        "OFFERING_REQUIRED",
+      );
+    }
+    liveRequest = {
       fromCity: senderCity,
       toCity: recipientCity,
       weightKg: weightKg || null,
@@ -294,13 +256,14 @@ async function createShipment(req, res) {
       customWidth,
       customHeight,
       serviceType: resolvedServiceType,
-      shipmentMode: shipmentMode || "LAND",
+      shipmentMode,
       isFragile: !!isFragile,
       requiresInsurance: !!requiresInsurance,
       insuranceValue: resolvedInsuranceValue,
       promoCode: promoCode || null,
       userId: req.user?.id,
-    });
+    };
+    quote = await calculateShippingCost(liveRequest);
     quotedPrice = quote.total;
 
     if (quote.pricingMode === "PROMO" && promoCode) {
@@ -347,24 +310,19 @@ async function createShipment(req, res) {
     console.warn("[createShipment] timezone error (non-fatal):", tzErr.message);
   }
 
-  const slaResult = await getEstimatedDelivery(
-    quote.zone,
-    resolvedServiceType,
-    resolvedPickupDate,
-    {
-      isSameCity:
-        !!quote.fromCity?.id && quote.fromCity.id === quote.toCity?.id,
-    },
-  );
-  console.log(
-    "[createShipment] SLA estimated delivery:",
-    slaResult.estimatedDelivery,
-  );
+  // Delivery date comes from the SLA the customer was promised (the quote's
+  // snapshot, or the live engine result) — never from today's SLA table.
+  const estimatedDelivery = lockedQuote
+    ? await estimatedDeliveryFor(lockedQuote, resolvedPickupDate)
+    : estimateDeliveryDate(resolvedPickupDate, quote.deliveryEstimate?.maxDays);
+  console.log("[createShipment] SLA estimated delivery:", estimatedDelivery);
 
   // PRD Sprint 3 state machine: Quoted → BOOKED (on creation) → Paid → Awaiting Pickup
   console.log("[createShipment] creating shipment record in DB...");
   // [V1 Feature 1] A mode admin has switched off can no longer be booked.
-  await assertModeActive(shipmentMode || lockedQuote?.shipmentMode || "LAND");
+  const resolvedMode = lockedQuote ? lockedQuote.shipmentMode : shipmentMode;
+  const resolvedRequiresInsurance = lockedQuote ? !!lockedQuote.insuranceSelected : !!requiresInsurance;
+  await assertModeActive(resolvedMode);
 
   const shipment = await prisma.shipment.create({
     data: {
@@ -395,17 +353,27 @@ async function createShipment(req, res) {
       serviceType: resolvedServiceType,
       quotedPrice,
       isFragile: !!isFragile,
-      requiresInsurance: !!requiresInsurance,
+      requiresInsurance: resolvedRequiresInsurance,
       insuranceValue: resolvedInsuranceValue || null,
       notes: notes || null,
       pickupDate: resolvedPickupDate,
-      estimatedDelivery: slaResult.estimatedDelivery,
+      estimatedDelivery,
       // ── V1 launch scope (best-effort on this legacy endpoint — see the
       // fully-validated /shipment-drafts flow for the enforced version) ──
-      shipmentMode: shipmentMode || (lockedQuote ? lockedQuote.shipmentMode : null) || null,
+      shipmentMode: resolvedMode || null,
+      // Locked commercial snapshot (product, SLA, priced breakdown).
+      ...(lockedQuote
+        ? shipmentSnapshotFields(lockedQuote)
+        : {
+            offeringId: quote.offeringId,
+            slaMinDays: quote.deliveryEstimate?.minDays ?? null,
+            slaMaxDays: quote.deliveryEstimate?.maxDays ?? null,
+            pricingSnapshot: buildSnapshot(quote, liveRequest),
+            surchargeBreakdown: quote.surchargeBreakdown?.length ? quote.surchargeBreakdown : null,
+          }),
       declaredValueKobo: lockedQuote?.declaredValueKobo ?? (resolvedInsuranceValue ? Math.round(resolvedInsuranceValue * 100) : null),
-      insuranceSelected: !!requiresInsurance,
-      uninsuredAckAt: !requiresInsurance && uninsuredAck ? new Date() : null,
+      insuranceSelected: resolvedRequiresInsurance,
+      uninsuredAckAt: !resolvedRequiresInsurance && uninsuredAck ? new Date() : null,
       senderType: senderType === "ON_BEHALF_OF" ? "ON_BEHALF_OF" : "MYSELF",
       principalName: senderType === "ON_BEHALF_OF" ? principalName || null : null,
       principalPhone: senderType === "ON_BEHALF_OF" ? principalPhone || null : null,
@@ -442,6 +410,21 @@ async function createShipment(req, res) {
       data: { status: "BOOKED", bookedAt: new Date(), shipmentId: shipment.id },
     });
     console.log("[createShipment] quote marked BOOKED");
+    // Move the quote's billable ad-hoc lines onto the shipment (kept linked
+    // to the quote too, for traceability) — same as the draft-confirm path.
+    await prisma.shipmentAdhocCharge.updateMany({
+      where: { quoteId: lockedQuote.id, status: { in: ["APPLIED", "APPROVED"] } },
+      data: { shipmentId: shipment.id },
+    });
+  } else if (quote.adhocEvaluation) {
+    // Live-priced booking: persist exactly the lines that are inside the total.
+    const rows = buildAdhocRows({
+      quoteId: undefined,
+      autoApply: quote.adhocEvaluation.autoApply,
+      suggested: quote.adhocEvaluation.suggested,
+      vatRatePercent: quote.taxRatePercent,
+    }).map(({ quoteId: _q, ...r }) => ({ ...r, shipmentId: shipment.id }));
+    if (rows.length) await prisma.shipmentAdhocCharge.createMany({ data: rows });
   }
 
   // Record promo redemption — increments usedCount and creates the
@@ -467,7 +450,7 @@ async function createShipment(req, res) {
 
   // [V1 Feature 7] Uninsured acknowledgment — stored with a snapshot of the
   // disclaimer text/limit the customer was shown.
-  if (!requiresInsurance && uninsuredAck) {
+  if (!resolvedRequiresInsurance && uninsuredAck) {
     recordUninsuredAck({
       userId: req.user.id,
       shipmentId: shipment.id,
@@ -599,6 +582,15 @@ async function getShipment(req, res) {
           // from appliedDiscount.discountAmount regardless of mode.
           promoDiscountKobo: true,
           basePriceKobo: true,
+          standardBasePriceKobo: true,
+          surchargeTotalKobo: true,
+          fuelSurchargeKobo: true,
+          remoteAreaFeeKobo: true,
+          adhocChargesKobo: true,
+          vatKobo: true,
+          insurancePremiumKobo: true,
+          totalPriceKobo: true,
+          slaLabel: true,
           zone: true,
           serviceType: true,
           originCityId: true,
@@ -621,15 +613,19 @@ async function getShipment(req, res) {
 
   const { quote: linkedQuote, ...shipmentFields } = shipment;
 
-  // Real zone+service-aware delivery estimate for the "view shipment"
-  // screens — same reasoning as the createShipment path above.
-  const deliveryEstimate = linkedQuote
-    ? await getDeliveryEstimate(linkedQuote.zone, linkedQuote.serviceType, {
-        isSameCity:
-          !!linkedQuote.originCityId &&
-          linkedQuote.originCityId === linkedQuote.destinationCityId,
-      })
-    : null;
+  // The delivery promise is the SLA snapshot taken at booking — the SAME one
+  // the customer saw on the quote — never today's SLA table. Legacy shipments
+  // (no snapshot) simply have no estimate object; estimatedDelivery still holds
+  // their booked date.
+  const deliveryEstimate =
+    shipment.slaMinDays !== null && shipment.slaMinDays !== undefined
+      ? {
+          minDays: shipment.slaMinDays,
+          maxDays: shipment.slaMaxDays,
+          label: linkedQuote?.slaLabel || formatDeliveryLabel(shipment.slaMinDays, shipment.slaMaxDays),
+          source: "SNAPSHOT",
+        }
+      : null;
 
   return success(res, {
     shipment: shipmentFields,
@@ -648,6 +644,7 @@ async function getShipment(req, res) {
                 }
               : null,
           deliveryEstimate,
+          pricing: pricingBlock(linkedQuote),
         }
       : null,
   });

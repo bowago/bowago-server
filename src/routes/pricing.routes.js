@@ -554,19 +554,59 @@ router.post(
  *         description: Super Admin access required
  */
 
-// ─── Delivery SLA (zone-based delivery days) ──────────────────────────────────
+// ─── Delivery SLA (zone × shipment mode × service type) ──────────────────────
+/**
+ * @swagger
+ * /pricing/delivery-sla:
+ *   get:
+ *     summary: List delivery SLAs (zone × shipmentMode × serviceType)
+ *     tags: [Pricing]
+ *     security: []
+ *     parameters:
+ *       - { in: query, name: zone, schema: { type: integer } }
+ *       - { in: query, name: shipmentMode, schema: { type: string, enum: [AIR, LAND, SEA] } }
+ *       - { in: query, name: serviceType, schema: { type: string, enum: [EXPRESS, STANDARD, ECONOMY] } }
+ *     responses:
+ *       200: { description: SLA rows }
+ *   put:
+ *     summary: Create or update the SLA for one zone + mode + service (Super Admin)
+ *     tags: [Pricing]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [zone, shipmentMode, serviceType, minDays, maxDays]
+ *             properties:
+ *               zone: { type: integer }
+ *               shipmentMode: { type: string, enum: [AIR, LAND, SEA] }
+ *               serviceType: { type: string, enum: [EXPRESS, STANDARD, ECONOMY] }
+ *               minDays: { type: integer }
+ *               maxDays: { type: integer }
+ *               reason: { type: string }
+ *     responses:
+ *       200: { description: Saved }
+ */
 router.get("/delivery-sla", deliverySLAController.listSLAs);
+router.put(
+  "/delivery-sla",
+  authenticate,
+  requireSuperAdmin,
+  deliverySLAController.upsertSLA,
+);
 router.patch(
   "/delivery-sla/:id",
   authenticate,
   requireSuperAdmin,
   deliverySLAController.updateSLA,
 );
-router.patch(
-  "/delivery-sla/zone/:zone/service/:serviceType",
+router.delete(
+  "/delivery-sla/:id",
   authenticate,
   requireSuperAdmin,
-  deliverySLAController.updateSLAByZoneService,
+  deliverySLAController.deleteSLA,
 );
 
 router.get(
