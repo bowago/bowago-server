@@ -629,6 +629,17 @@ function buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix }) {
   return { zoneLookup, kmLookup };
 }
 
+// ─── Shared: Delivery SLA sheet (diagnostic) ─────────────────────────────────
+// A flat list of every configured zone + mode + service delivery promise.
+// Included in both exports so a support/admin investigation into "why is
+// this route showing no delivery estimate" doesn't need a separate lookup —
+// an empty or short sheet here is the single most common cause of that.
+function buildDeliverySLASheet(wb, slas) {
+  const header = ['Zone', 'Shipment Mode', 'Service Type', 'Min Days', 'Max Days', 'Label'];
+  const rows = [header, ...slas.map((s) => [s.zone, s.shipmentMode, s.serviceType, s.minDays, s.maxDays, s.label ?? ''])];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Delivery SLA');
+}
+
 // ─── EXPORT Zone & City sheet (Rate Management capability) ─────────────────
 // A lighter, focused export — just Cities, Zone Matrix, Matrix by KM and
 // Coverage Gaps — for admins managing routes/zones without touching Price
@@ -636,14 +647,16 @@ function buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix }) {
 // export (same shared builder), so a file from either export round-trips
 // through either import below.
 async function exportZoneCitySheet(req, res) {
-  const [cities, zoneMatrix, kmMatrix] = await Promise.all([
+  const [cities, zoneMatrix, kmMatrix, slas] = await Promise.all([
     prisma.city.findMany({ orderBy: { name: 'asc' } }),
     prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
     prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.deliverySLA.findMany({ orderBy: [{ shipmentMode: 'asc' }, { zone: 'asc' }, { serviceType: 'asc' }] }),
   ]);
 
   const wb = XLSX.utils.book_new();
   buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix });
+  buildDeliverySLASheet(wb, slas);
 
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = `BowaGO-Zone-City-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
@@ -657,12 +670,13 @@ async function exportZoneCitySheet(req, res) {
 }
 
 async function exportPricingSheet(req, res) {
-  const [cities, dimensions, zoneMatrix, kmMatrix, priceBands] = await Promise.all([
+  const [cities, dimensions, zoneMatrix, kmMatrix, priceBands, slas] = await Promise.all([
     prisma.city.findMany({ orderBy: { name: 'asc' } }),
     prisma.boxDimension.findMany({ orderBy: { categoryId: 'asc' } }),
     prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
     prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
     prisma.priceBand.findMany({ orderBy: [{ shipmentMode: 'asc' }, { serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }] }),
+    prisma.deliverySLA.findMany({ orderBy: [{ shipmentMode: 'asc' }, { zone: 'asc' }, { serviceType: 'asc' }] }),
   ]);
 
   const wb = XLSX.utils.book_new();
@@ -698,6 +712,8 @@ async function exportPricingSheet(req, res) {
     ]);
   }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(priceRows), 'Price Bands');
+
+  buildDeliverySLASheet(wb, slas);
 
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = `BowaGO-Pricing-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
