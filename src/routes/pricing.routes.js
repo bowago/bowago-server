@@ -531,6 +531,69 @@ router.post(
 
 /**
  * @swagger
+ * /pricing/zone-city/export:
+ *   get:
+ *     summary: Export Zone & City data only (Rate Management capability)
+ *     description: >
+ *       A lighter counterpart to /pricing/export — just Cities, Zone Matrix,
+ *       Matrix by KM and Coverage Gaps, for admins fixing routes/zones
+ *       without touching Price Bands or Dimensions. Same sheet layout as the
+ *       full pricing export, so files are interchangeable between the two.
+ *       Available to Super Admin and any Role Admin granted the
+ *       "canManageRates" capability.
+ *     tags: [Pricing]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: .xlsx file download
+ *       403:
+ *         description: Rate management capability required
+ * /pricing/zone-city/import:
+ *   post:
+ *     summary: Import Zone & City data only (Rate Management capability)
+ *     description: >
+ *       Reads 'Cities' / 'Zone Matrix' / 'Matrix by KM' sheets from an
+ *       uploaded .xlsx — the SAME template exportZoneCitySheet produces (and
+ *       also accepts a full Pricing export/import file, since it just looks
+ *       for those sheet names and ignores the rest). Any 'Price Bands' or
+ *       'Dimensions' sheet present is ignored — this endpoint never touches
+ *       pricing, only routes/zones.
+ *     tags: [Pricing]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       200:
+ *         description: Import completed
+ *       400:
+ *         description: No file uploaded, or file has neither a 'Cities' nor 'Zone Matrix' sheet
+ *       403:
+ *         description: Rate management capability required
+ */
+router.get(
+  "/zone-city/export",
+  authenticate,
+  requireRateManagement,
+  pricingController.exportZoneCitySheet,
+);
+router.post(
+  "/zone-city/import",
+  authenticate,
+  requireRateManagement,
+  uploadImport.single("file"),
+  pricingController.importZoneCitySheet,
+);
+
+/**
+ * @swagger
  * /pricing/export:
  *   get:
  *     summary: Export current pricing data as an .xlsx file (Super Admin)

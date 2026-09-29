@@ -563,29 +563,12 @@ async function rollbackPriceBand(req, res) {
 //   - Zone Matrix      (city x city grid of zone numbers)
 //   - Matrix by KM     (city x city grid of distances)
 //   - Price Bands      (flat sheet: zone, band, serviceType, pricePerKg, basePrice, isActive)
-async function exportPricingSheet(req, res) {
-  const [cities, dimensions, zoneMatrix, kmMatrix, priceBands] = await Promise.all([
-    prisma.city.findMany({ orderBy: { name: 'asc' } }),
-    prisma.boxDimension.findMany({ orderBy: { categoryId: 'asc' } }),
-    prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
-    prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
-    prisma.priceBand.findMany({ orderBy: [{ shipmentMode: 'asc' }, { serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }] }),
-  ]);
-
-  const wb = XLSX.utils.book_new();
+// ─── Shared: Cities + Zone Matrix + Matrix-by-KM + Coverage Gaps sheets ─────
+// Used by BOTH the full exportPricingSheet AND the standalone Zone/City-only
+// export (exportZoneCitySheet) below — identical sheet names/layout either
+// way, so a file from one export always imports through either endpoint.
+function buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix }) {
   const cityNames = cities.map((c) => c.name);
-
-  // ── Dimensions sheet ──
-  // Mirrors the import format: a header row, then CSV rows of
-  // "category_id,display_name,length,width,height,best_for,weight_limit"
-  const dimRows = [
-    ['category_id,display_name,length_cm,width_cm,height_cm,best_for,weight_kg_limit'],
-    ...dimensions.map((d) => [
-      `${d.categoryId},${d.displayName},${d.lengthCm},${d.widthCm},${d.heightCm},${d.bestFor ?? ''},${d.weightKgLimit}`,
-    ]),
-  ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dimRows), 'Dimensions');
-
   // ── Zone Matrix sheet (city x city grid) ──
   const zoneLookup = new Map();
   for (const z of zoneMatrix) {
@@ -618,25 +601,6 @@ async function exportPricingSheet(req, res) {
   }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(kmRows), 'Matrix by KM');
 
-  // ── Price Bands sheet (flat — current actual pricing) ──
-  const priceHeader = ['Zone', 'Min Kg', 'Max Kg', 'Mode', 'Service Type', 'Price Per Kg (NGN)', 'Base Price (NGN)', 'Fixed Price/Kg By Zone (JSON)', 'Active', 'Notes'];
-  const priceRows = [priceHeader];
-  for (const b of priceBands) {
-    priceRows.push([
-      b.zone,
-      b.minKg,
-      b.maxKg ?? 'No limit',
-      b.shipmentMode,
-      b.serviceType,
-      b.pricePerKg,
-      b.basePrice,
-      b.fixedPricePerKgByZone ? JSON.stringify(b.fixedPricePerKgByZone) : '',
-      b.isActive ? 'TRUE' : 'FALSE',
-      b.notes ?? '',
-    ]);
-  }
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(priceRows), 'Price Bands');
-
   // ── Cities sheet (reference — region/state per city) ──
   const cityHeader = ['Name', 'Region', 'State'];
   const cityRows = [cityHeader, ...cities.map((c) => [c.name, c.region, c.state])];
@@ -662,6 +626,79 @@ async function exportPricingSheet(req, res) {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(gapRows), 'Coverage Gaps');
   }
 
+  return { zoneLookup, kmLookup };
+}
+
+// ─── EXPORT Zone & City sheet (Rate Management capability) ─────────────────
+// A lighter, focused export — just Cities, Zone Matrix, Matrix by KM and
+// Coverage Gaps — for admins managing routes/zones without touching Price
+// Bands or Dimensions. Uses the EXACT SAME sheet layout as the full pricing
+// export (same shared builder), so a file from either export round-trips
+// through either import below.
+async function exportZoneCitySheet(req, res) {
+  const [cities, zoneMatrix, kmMatrix] = await Promise.all([
+    prisma.city.findMany({ orderBy: { name: 'asc' } }),
+    prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+  ]);
+
+  const wb = XLSX.utils.book_new();
+  buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix });
+
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const filename = `BowaGO-Zone-City-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+  res.set({
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': buffer.length,
+  });
+  res.send(buffer);
+}
+
+async function exportPricingSheet(req, res) {
+  const [cities, dimensions, zoneMatrix, kmMatrix, priceBands] = await Promise.all([
+    prisma.city.findMany({ orderBy: { name: 'asc' } }),
+    prisma.boxDimension.findMany({ orderBy: { categoryId: 'asc' } }),
+    prisma.zoneMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.kmMatrix.findMany({ include: { fromCity: true, toCity: true } }),
+    prisma.priceBand.findMany({ orderBy: [{ shipmentMode: 'asc' }, { serviceType: 'asc' }, { zone: 'asc' }, { minKg: 'asc' }] }),
+  ]);
+
+  const wb = XLSX.utils.book_new();
+
+  // ── Dimensions sheet ──
+  // Mirrors the import format: a header row, then CSV rows of
+  // "category_id,display_name,length,width,height,best_for,weight_limit"
+  const dimRows = [
+    ['category_id,display_name,length_cm,width_cm,height_cm,best_for,weight_kg_limit'],
+    ...dimensions.map((d) => [
+      `${d.categoryId},${d.displayName},${d.lengthCm},${d.widthCm},${d.heightCm},${d.bestFor ?? ''},${d.weightKgLimit}`,
+    ]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dimRows), 'Dimensions');
+
+  const { zoneLookup, kmLookup } = buildCitiesZonesKmSheets(wb, { cities, zoneMatrix, kmMatrix });
+
+  // ── Price Bands sheet (flat — current actual pricing) ──
+  const priceHeader = ['Zone', 'Min Kg', 'Max Kg', 'Mode', 'Service Type', 'Price Per Kg (NGN)', 'Base Price (NGN)', 'Fixed Price/Kg By Zone (JSON)', 'Active', 'Notes'];
+  const priceRows = [priceHeader];
+  for (const b of priceBands) {
+    priceRows.push([
+      b.zone,
+      b.minKg,
+      b.maxKg ?? 'No limit',
+      b.shipmentMode,
+      b.serviceType,
+      b.pricePerKg,
+      b.basePrice,
+      b.fixedPricePerKgByZone ? JSON.stringify(b.fixedPricePerKgByZone) : '',
+      b.isActive ? 'TRUE' : 'FALSE',
+      b.notes ?? '',
+    ]);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(priceRows), 'Price Bands');
+
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = `BowaGO-Pricing-Export-${new Date().toISOString().slice(0, 10)}.xlsx`;
 
@@ -673,51 +710,11 @@ async function exportPricingSheet(req, res) {
   res.send(buffer);
 }
 
-async function importPricingSheet(req, res) {
-  if (!req.file) throw new ApiError(400, 'No file uploaded');
-
-  const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-
-  const results = { cities: 0, zones: 0, km: 0, priceBands: 0, dimensions: 0, errors: [] };
-  const importerId = req.user?.id ?? null;
-
-  // The legacy pricing sheet has no mode column — it is a single rate card, so
-  // the mode it belongs to must be stated. Defaults to LAND (the mode all
-  // pre-existing sheets were written for); pass `shipmentMode` to import an
-  // AIR or SEA card. Bands are only created for products that are DEFINED
-  // offerings in that mode — never for a mode/service BowaGO does not sell.
-  const importMode = (req.body?.shipmentMode || 'LAND').toUpperCase();
-  if (!['AIR', 'LAND', 'SEA'].includes(importMode)) {
-    throw new ApiError(400, 'shipmentMode must be one of AIR, LAND, SEA');
-  }
-  const importOfferings = await prisma.serviceOffering.findMany({ where: { shipmentMode: importMode } });
-  const importServices = importOfferings.map((o) => o.serviceType);
-
-  // Dimensions sheet
-  if (workbook.SheetNames.includes('Dimensions')) {
-    const sheet = XLSX.utils.sheet_to_json(workbook.Sheets['Dimensions'], { header: 1 });
-    let csvStartIdx = -1;
-    for (let i = 0; i < sheet.length; i++) {
-      if (sheet[i][0] && String(sheet[i][0]).startsWith('category_id')) { csvStartIdx = i + 1; break; }
-    }
-    if (csvStartIdx > 0) {
-      for (let i = csvStartIdx; i < sheet.length; i++) {
-        const row = sheet[i];
-        if (!row[0]) continue;
-        try {
-          const [categoryId, displayName, lengthCm, widthCm, heightCm, bestFor, weightKgLimit] =
-            String(row[0]).split(',');
-          await prisma.boxDimension.upsert({
-            where: { categoryId: categoryId.trim() },
-            update: { displayName: displayName.trim(), lengthCm: parseFloat(lengthCm), widthCm: parseFloat(widthCm), heightCm: parseFloat(heightCm), bestFor: bestFor?.trim(), weightKgLimit: parseFloat(weightKgLimit) },
-            create: { categoryId: categoryId.trim(), displayName: displayName.trim(), lengthCm: parseFloat(lengthCm), widthCm: parseFloat(widthCm), heightCm: parseFloat(heightCm), bestFor: bestFor?.trim(), weightKgLimit: parseFloat(weightKgLimit) },
-          });
-          results.dimensions++;
-        } catch (e) { results.errors.push(`Dimension row ${i}: ${e.message}`); }
-      }
-    }
-  }
-
+// ─── Shared: Cities + Zone Matrix + Matrix-by-KM import ─────────────────────
+// Used by BOTH the full importPricingSheet AND the standalone Zone/City-only
+// import (importZoneCitySheet) below — one code path, so a file exported by
+// either endpoint imports identically through either endpoint.
+async function importCitiesZonesKm(workbook, results) {
   // ─── Build city → region/state map ────────────────────────────────────────
   // Known Nigerian city → state lookup so imported cities get real metadata
   const knownCityStates = {
@@ -903,6 +900,81 @@ async function importPricingSheet(req, res) {
       }
     });
   }
+}
+
+// ─── IMPORT Zone & City sheet (Rate Management capability) ──────────────────
+// A lighter, focused import counterpart to exportZoneCitySheet — reads a
+// workbook containing 'Cities' / 'Zone Matrix' / 'Matrix by KM' sheets (the
+// SAME sheet names and layout the full pricing import/export use) and
+// upserts them, ignoring any 'Price Bands' or 'Dimensions' sheets present so
+// an admin can fix routes/zones without risking a price change. Delegates to
+// the exact same importCitiesZonesKm() the full import uses.
+async function importZoneCitySheet(req, res) {
+  if (!req.file) throw new ApiError(400, 'No file uploaded');
+
+  const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+  const results = { cities: 0, zones: 0, km: 0, errors: [] };
+
+  if (!workbook.SheetNames.includes('Zone Matrix') && !workbook.SheetNames.includes('Cities')) {
+    throw new ApiError(400, "This file has no 'Zone Matrix' or 'Cities' sheet — export a Zone & City template first and edit that.");
+  }
+
+  await importCitiesZonesKm(workbook, results);
+
+  return success(
+    res,
+    { results },
+    `Imported ${results.cities} cities, ${results.zones} zone entries, ${results.km} distance entries` +
+      (results.errors.length ? ` (${results.errors.length} error(s) — see results.errors)` : ''),
+  );
+}
+
+async function importPricingSheet(req, res) {
+  if (!req.file) throw new ApiError(400, 'No file uploaded');
+
+  const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+
+  const results = { cities: 0, zones: 0, km: 0, priceBands: 0, dimensions: 0, errors: [] };
+  const importerId = req.user?.id ?? null;
+
+  // The legacy pricing sheet has no mode column — it is a single rate card, so
+  // the mode it belongs to must be stated. Defaults to LAND (the mode all
+  // pre-existing sheets were written for); pass `shipmentMode` to import an
+  // AIR or SEA card. Bands are only created for products that are DEFINED
+  // offerings in that mode — never for a mode/service BowaGO does not sell.
+  const importMode = (req.body?.shipmentMode || 'LAND').toUpperCase();
+  if (!['AIR', 'LAND', 'SEA'].includes(importMode)) {
+    throw new ApiError(400, 'shipmentMode must be one of AIR, LAND, SEA');
+  }
+  const importOfferings = await prisma.serviceOffering.findMany({ where: { shipmentMode: importMode } });
+  const importServices = importOfferings.map((o) => o.serviceType);
+
+  // Dimensions sheet
+  if (workbook.SheetNames.includes('Dimensions')) {
+    const sheet = XLSX.utils.sheet_to_json(workbook.Sheets['Dimensions'], { header: 1 });
+    let csvStartIdx = -1;
+    for (let i = 0; i < sheet.length; i++) {
+      if (sheet[i][0] && String(sheet[i][0]).startsWith('category_id')) { csvStartIdx = i + 1; break; }
+    }
+    if (csvStartIdx > 0) {
+      for (let i = csvStartIdx; i < sheet.length; i++) {
+        const row = sheet[i];
+        if (!row[0]) continue;
+        try {
+          const [categoryId, displayName, lengthCm, widthCm, heightCm, bestFor, weightKgLimit] =
+            String(row[0]).split(',');
+          await prisma.boxDimension.upsert({
+            where: { categoryId: categoryId.trim() },
+            update: { displayName: displayName.trim(), lengthCm: parseFloat(lengthCm), widthCm: parseFloat(widthCm), heightCm: parseFloat(heightCm), bestFor: bestFor?.trim(), weightKgLimit: parseFloat(weightKgLimit) },
+            create: { categoryId: categoryId.trim(), displayName: displayName.trim(), lengthCm: parseFloat(lengthCm), widthCm: parseFloat(widthCm), heightCm: parseFloat(heightCm), bestFor: bestFor?.trim(), weightKgLimit: parseFloat(weightKgLimit) },
+          });
+          results.dimensions++;
+        } catch (e) { results.errors.push(`Dimension row ${i}: ${e.message}`); }
+      }
+    }
+  }
+
+  await importCitiesZonesKm(workbook, results);
 
   // ─── Price sheet → priceBand records ─────────────────────────────────────
   // Expected columns: KG (range like "50 -200"), Tons, Cartons, Zone (numeric)
@@ -1133,4 +1205,5 @@ module.exports = {
   getZoneMatrix, upsertZoneMatrix, updateZoneMatrix, pauseZoneMatrix, reinstateZoneMatrix, deleteZoneMatrix,
   getPricingStats,
   rollbackPriceBand, importPricingSheet, exportPricingSheet, backfillLowWeightBands,
+  importZoneCitySheet, exportZoneCitySheet,
 };
